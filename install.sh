@@ -1,96 +1,54 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO_URL="${NODELITE_REPO_URL:-https://github.com/dabao9037/nodelite.git}"
+REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
+SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
+BIN_DIR="${NODELITE_BIN_DIR:-/usr/local/bin}"
 DEFAULT_PORT=2060
+INTERNAL_PORT=18080
 PASSWORD_KEY="ADMIN_""PASSWORD"
 SECRET_KEY="APP_""SECRET"
+SERVICES=(nodelite-netguard.service nodelite-xray.service nodelite-panel.service nodelite-gateway.service)
 
-if [[ $EUID -ne 0 ]]; then
-  echo "请使用 root 运行：sudo bash install.sh" >&2
-  exit 1
-fi
-
+[[ $EUID -eq 0 ]] || { echo "请使用 root 运行：sudo bash install.sh" >&2; exit 1; }
 info() { printf '\033[0;36m[*]\033[0m %s\n' "$*"; }
 ok() { printf '\033[0;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[0;33m[!]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[0;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
-
 random_password() { openssl rand -base64 24 | tr -d '\n=/+' | cut -c1-20; }
 random_secret() { openssl rand -hex 32; }
 random_path() { printf 'panel-%s' "$(openssl rand -hex 8)"; }
+valid_port() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 1 <= $1 && $1 <= 65535 )); }
+normalize_path() { local v="${1#/}"; v="${v%/}"; [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || return 1; printf '%s' "$v"; }
+read_key() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n1 || true; }
+set_key() { local f="$1" k="$2" v="$3" t; t="$(mktemp)"; [[ ! -f "$f" ]] || grep -v "^${k}=" "$f" >"$t" || true; printf '%s=%s\n' "$k" "$v" >>"$t"; install -m 600 "$t" "$f"; rm -f "$t"; }
+have_systemd() { command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; }
+service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"; }
 
-valid_port() {
-  [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 1 <= $1 && $1 <= 65535 ))
+ensure_tools() {
+  local missing=() cmd
+  for cmd in curl tar openssl; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
+  ((${#missing[@]} == 0)) && return
+  warn "仅安装缺失的基础工具：${missing[*]}"
+  if command -v apt-get >/dev/null; then apt-get update && apt-get install -y ca-certificates curl tar openssl
+  elif command -v dnf >/dev/null; then dnf install -y ca-certificates curl tar openssl
+  elif command -v yum >/dev/null; then yum install -y ca-certificates curl tar openssl
+  else die "请先安装 curl、tar、openssl"; fi
 }
 
-normalize_path() {
-  local value="${1#/}"; value="${value%/}"
-  [[ "$value" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || return 1
-  printf '%s' "$value"
+asset_arch() {
+  case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) die "暂不支持架构：$(uname -m)";; esac
 }
-
-read_key() {
-  local file="$1" key="$2"
-  [[ -f "$file" ]] || return 0
-  sed -n "s/^${key}=//p" "$file" | tail -n1
+latest_tag() {
+  [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
-
-set_key() {
-  local file="$1" key="$2" value="$3" tmp
-  tmp="$(mktemp)"
-  if [[ -f "$file" ]]; then
-    grep -v "^${key}=" "$file" >"$tmp" || true
-  fi
-  printf '%s=%s\n' "$key" "$value" >>"$tmp"
-  install -m 600 "$tmp" "$file"
-  rm -f "$tmp"
-}
-
-install_packages() {
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y ca-certificates curl git openssl
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl git openssl
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl git openssl
-  else
-    die "仅支持 apt、dnf 或 yum 系统"
-  fi
-}
-
-install_docker() {
-  command -v curl >/dev/null 2>&1 || install_packages
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable --now docker 2>/dev/null || service docker start
-}
-
-ensure_dependencies() {
-  command -v git >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || install_packages
-  command -v docker >/dev/null 2>&1 || install_docker
-  docker compose version >/dev/null 2>&1 || die "Docker Compose 插件不可用，请先安装 Docker Compose v2"
-}
-
-sync_repo() {
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    git -C "$INSTALL_DIR" fetch --depth=1 origin main
-    git -C "$INSTALL_DIR" reset --hard origin/main
-  elif [[ -e "$INSTALL_DIR" ]]; then
-    die "安装目录已存在且不是 NodeLite Git 仓库：$INSTALL_DIR"
-  else
-    git clone --depth=1 "$REPO_URL" "$INSTALL_DIR"
-  fi
-}
-
-require_install() {
-  [[ -f "$INSTALL_DIR/docker-compose.yml" && -f "$INSTALL_DIR/.env" ]] || die "NodeLite 尚未安装，请先选择 1"
-}
+require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
 
 install_shortcuts() {
-  local target=/usr/local/bin/node alias=/usr/local/bin/nodelite existing
+  mkdir -p "$BIN_DIR"
+  local alias="$BIN_DIR/nodelite" target="$BIN_DIR/node" existing
   cat >"$alias" <<EOF
 #!/usr/bin/env bash
 # NodeLite management shortcut
@@ -101,292 +59,157 @@ else
 fi
 EOF
   chmod 0755 "$alias"
-
   existing="$(command -v node 2>/dev/null || true)"
   if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
-    cp "$alias" "$target"
-    chmod 0755 "$target"
-    ok "快捷命令已安装：node"
-  else
-    warn "检测到已有 node 命令：$existing，未覆盖；可使用 nodelite 进入菜单"
-  fi
+    cp "$alias" "$target"; chmod 0755 "$target"; ok "快捷命令已安装：node"
+  else warn "检测到已有 Node.js：$existing，未覆盖；请使用 nodelite"; fi
 }
 
+write_environment() {
+  local host="$1" port="$2" path="$3" user="$4" password="$5" secret="$6"
+  mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/data" "$INSTALL_DIR/xray-config"
+  chmod 700 "$INSTALL_DIR/data"
+  cat >"$INSTALL_DIR/config/nodelite.env" <<EOF
+RUNTIME_BACKEND=native
+NODELITE_HOME=$INSTALL_DIR
+DB_PATH=$INSTALL_DIR/data/panel.db
+XRAY_CONFIG_PATH=$INSTALL_DIR/xray-config/config.json
+PUBLIC_HOST=$host
+ADMIN_USER=$user
+${PASSWORD_KEY}=$password
+${SECRET_KEY}=$secret
+NETGUARD_REQUIRED=1
+NETGUARD_SOCKET=/run/nodelite/netguard.sock
+BACKGROUND_INTERVAL_SECONDS=2
+PANEL_INTERNAL_PORT=$INTERNAL_PORT
+UPSTREAM_HOST=127.0.0.1
+UPSTREAM_PORT=$INTERNAL_PORT
+LISTEN_HOST=0.0.0.0
+LISTEN_PORT=$port
+ACCESS_PATH=$path
+EOF
+  chmod 600 "$INSTALL_DIR/config/nodelite.env"
+}
+
+install_units() {
+  mkdir -p "$SYSTEMD_DIR"
+  local unit installed temporary
+  for unit in "$INSTALL_DIR"/systemd/*.service; do
+    installed="$SYSTEMD_DIR/$(basename "$unit")"
+    if [[ "$SYSTEMD_DIR" == "/etc/systemd/system" ]] && [[ -e "$installed" ]] && ! grep -q '^Description=NodeLite' "$installed"; then
+      die "拒绝覆盖非 NodeLite systemd unit：$installed"
+    fi
+    temporary="$(mktemp)"
+    sed "s#/opt/nodelite#$INSTALL_DIR#g" "$unit" >"$temporary"
+    install -m 0644 "$temporary" "$installed"
+    rm -f "$temporary"
+  done
+  service_ctl daemon-reload
+  service_ctl enable "${SERVICES[@]}"
+}
 
 wait_healthy() {
-  local attempt panel_health xray_health netguard_health gateway_health
-  for attempt in $(seq 1 60); do
-    gateway_health="$(docker inspect simple-node-gateway --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-    panel_health="$(docker inspect simple-node-panel --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-    xray_health="$(docker inspect simple-node-xray --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-    netguard_health="$(docker inspect simple-node-netguard --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-    if [[ "$gateway_health" == healthy && "$panel_health" == healthy && "$xray_health" == healthy && "$netguard_health" == healthy ]]; then
-      return 0
-    fi
-    if [[ "$attempt" == 60 ]]; then
-      docker compose ps -a
-      docker compose logs --tail=150 gateway panel xray netguard
-      return 1
-    fi
-    sleep 5
+  local i health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
+  for i in $(seq 1 60); do
+    if curl -fsS --max-time 3 "$health" | grep -q '"status":"ok"'; then return; fi
+    sleep 2
   done
+  service_ctl --no-pager --full status "${SERVICES[@]}" || true
+  die "服务未在规定时间内恢复健康"
 }
-
 show_access() {
-  local host port path user
-  host="$(read_key "$INSTALL_DIR/.env" PUBLIC_HOST)"
-  port="$(read_key "$INSTALL_DIR/.env" PANEL_PORT)"
-  path="$(read_key "$INSTALL_DIR/.env" ACCESS_PATH)"
-  user="$(read_key "$INSTALL_DIR/.env.credentials" ADMIN_USER)"
-  cat <<EOF
-
-访问地址：http://$host:$port/$path/login
-用户名：$user
-安装目录：$INSTALL_DIR
-
-EOF
+  local f="$INSTALL_DIR/config/nodelite.env"
+  printf '\n访问地址：http://%s:%s/%s/login\n用户名：%s\n安装目录：%s\n\n' \
+    "$(read_key "$f" PUBLIC_HOST)" "$(read_key "$f" LISTEN_PORT)" "$(read_key "$f" ACCESS_PATH)" "$(read_key "$f" ADMIN_USER)" "$INSTALL_DIR"
 }
 
 install_or_update() {
-  ensure_dependencies
-  local old_host old_port old_path old_user old_password old_secret
-  old_host="$(read_key "$INSTALL_DIR/.env" PUBLIC_HOST)"
-  old_port="$(read_key "$INSTALL_DIR/.env" PANEL_PORT)"
-  old_path="$(read_key "$INSTALL_DIR/.env" ACCESS_PATH)"
-  old_user="$(read_key "$INSTALL_DIR/.env.credentials" ADMIN_USER)"
-  old_password="$(read_key "$INSTALL_DIR/.env.credentials" "$PASSWORD_KEY")"
-  old_secret="$(read_key "$INSTALL_DIR/.env.credentials" "$SECRET_KEY")"
-
-  local requested_password="${!PASSWORD_KEY:-}" requested_secret="${!SECRET_KEY:-}"
-  local host="${PUBLIC_HOST:-$old_host}" port="${PANEL_PORT:-$old_port}" path="${ACCESS_PATH:-$old_path}"
-  local user="${ADMIN_USER:-$old_user}" password secret
-
-  if [[ -z "$host" ]]; then
-    host="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+  ensure_tools
+  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret
+  arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
+  url="https://github.com/$REPO/releases/download/$tag/nodelite-linux-$arch.tar.gz"
+  host="${PUBLIC_HOST:-$(read_key "$old" PUBLIC_HOST)}"; [[ -n "$host" ]] || host="$(curl -4fsS --max-time 8 https://api.ipify.org || hostname -I | awk '{print $1}')"
+  port="${PANEL_PORT:-$(read_key "$old" LISTEN_PORT)}"; port="${port:-$DEFAULT_PORT}"; valid_port "$port" || die "端口必须为 1-65535"
+  path="${ACCESS_PATH:-$(read_key "$old" ACCESS_PATH)}"; path="${path:-$(random_path)}"; path="$(normalize_path "$path")" || die "随机路径格式错误"
+  user="${ADMIN_USER:-$(read_key "$old" ADMIN_USER)}"; user="${user:-admin}"
+  password="${!PASSWORD_KEY:-$(read_key "$old" "$PASSWORD_KEY")}"; password="${password:-$(random_password)}"
+  secret="${!SECRET_KEY:-$(read_key "$old" "$SECRET_KEY")}"; secret="${secret:-$(random_secret)}"
+  tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
+  info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
+  tar -tzf "$tmp/release.tar.gz" >/dev/null
+  mkdir -p "$INSTALL_DIR"; tar -xzf "$tmp/release.tar.gz" -C "$INSTALL_DIR"
+  cp "$0" "$INSTALL_DIR/install.sh"; chmod 0755 "$INSTALL_DIR/install.sh"
+  write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
+  if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
+    cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'
+{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"blocked"}]}
+JSON
   fi
-  [[ -n "$host" ]] || die "无法检测公网 IP，请使用 PUBLIC_HOST=域名或IP 重新执行"
-  port="${port:-$DEFAULT_PORT}"
-  valid_port "$port" || die "PANEL_PORT 必须是 1-65535 的端口"
-  path="${path:-$(random_path)}"
-  path="$(normalize_path "$path")" || die "ACCESS_PATH 只能包含字母、数字、下划线和横线，长度 8-64"
-  user="${user:-admin}"
-  password="${requested_password:-${old_password:-$(random_password)}}"
-  secret="${requested_secret:-${old_secret:-$(random_secret)}}"
-
-  sync_repo
-  cd "$INSTALL_DIR"
-  cat >.env <<EOF
-PUBLIC_HOST=$host
-PANEL_PORT=$port
-ACCESS_PATH=$path
-IMAGE_TAG=${IMAGE_TAG:-latest}
-EOF
-  {
-    printf 'ADMIN_USER=%s\n' "$user"
-    printf '%s=%s\n' "$PASSWORD_KEY" "$password"
-    printf '%s=%s\n' "$SECRET_KEY" "$secret"
-  } >.env.credentials
-  chmod 600 .env .env.credentials
-  mkdir -p data xray-config
-  chmod 700 data
-  chmod 755 xray-config
-
-  install_shortcuts
-  docker compose down --remove-orphans >/dev/null 2>&1 || true
-  if [[ "${NODELITE_FORCE_BUILD:-0}" != "1" ]] && docker compose pull gateway panel netguard xray; then
-    docker compose up -d --no-build --remove-orphans
-  else
-    warn "预构建镜像不可用，回退到本机构建"
-    docker compose up -d --build --remove-orphans
-  fi
-  wait_healthy || exit 1
-  ok "NodeLite 安装/更新完成"
-  show_access
-  if [[ -z "$old_password" || -n "$requested_password" ]]; then
-    printf '密码：%s\n\n' "$password"
-    warn "请立即保存密码；凭据文件位于 $INSTALL_DIR/.env.credentials"
-  fi
+  install_units; install_shortcuts
+  service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
+  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
+  [[ -f "$old" ]] || printf '密码：%s\n' "$password"
 }
 
-change_credentials() {
-  require_install
-  local user="${2:-}" password="${3:-}"
-  if [[ -t 0 ]]; then
-    read -r -p "新管理员用户名 [admin]: " user
-    read -r -s -p "新管理员密码（留空则随机生成）: " password; echo
-  fi
-  user="${user:-admin}"
-  password="${password:-$(random_password)}"
-  set_key "$INSTALL_DIR/.env.credentials" ADMIN_USER "$user"
-  set_key "$INSTALL_DIR/.env.credentials" "$PASSWORD_KEY" "$password"
-  cd "$INSTALL_DIR"
-  docker compose up -d --force-recreate panel gateway xray
-  wait_healthy
-  ok "管理员凭据已更新"
-  printf '用户名：%s\n密码：%s\n' "$user" "$password"
+change_value_restart() {
+  require_native; set_key "$INSTALL_DIR/config/nodelite.env" "$1" "$2"; service_ctl restart "${@:3}"; wait_healthy
 }
+change_credentials() { require_native; local u="${2:-}" p="${3:-}"; [[ -n "$u" ]] || read -r -p "新用户名 [admin]: " u; [[ -n "$p" ]] || { read -r -s -p "新密码（留空随机）: " p; echo; }; u="${u:-admin}"; p="${p:-$(random_password)}"; set_key "$INSTALL_DIR/config/nodelite.env" ADMIN_USER "$u"; change_value_restart "$PASSWORD_KEY" "$p" nodelite-panel.service; printf '用户名：%s\n密码：%s\n' "$u" "$p"; }
+change_port() { require_native; local v="${2:-}"; [[ -n "$v" ]] || read -r -p "新端口: " v; valid_port "$v" || die "端口错误"; change_value_restart LISTEN_PORT "$v" nodelite-gateway.service; show_access; }
+change_path() { require_native; local v="${2:-$(random_path)}"; v="$(normalize_path "$v")" || die "路径错误"; change_value_restart ACCESS_PATH "$v" nodelite-gateway.service; show_access; }
+change_host() { require_native; local v="${2:-}"; [[ -n "$v" ]] || read -r -p "公网 IP/域名: " v; [[ -n "$v" && ! "$v" =~ [[:space:]/] ]] || die "地址错误"; change_value_restart PUBLIC_HOST "$v" nodelite-panel.service; show_access; }
+show_status() { require_native; service_ctl --no-pager --full status "${SERVICES[@]}" || true; show_access; }
+restart_services() { require_native; service_ctl restart "${SERVICES[@]}"; wait_healthy; ok "NodeLite 已重启"; }
 
-change_port() {
-  require_install
-  local port="${2:-}"
-  [[ -n "$port" ]] || read -r -p "新访问端口: " port
-  valid_port "$port" || die "端口必须是 1-65535"
-  set_key "$INSTALL_DIR/.env" PANEL_PORT "$port"
-  cd "$INSTALL_DIR"
-  docker compose up -d --force-recreate gateway
-  wait_healthy
-  ok "访问端口已修改"
-  show_access
-}
-
-change_path() {
-  require_install
-  local path="${2:-}"
-  if [[ -z "$path" && -t 0 ]]; then
-    read -r -p "新随机目录（留空自动生成）: " path
-  fi
-  path="${path:-$(random_path)}"
-  path="$(normalize_path "$path")" || die "目录只能包含字母、数字、下划线和横线，长度 8-64"
-  set_key "$INSTALL_DIR/.env" ACCESS_PATH "$path"
-  cd "$INSTALL_DIR"
-  docker compose up -d --force-recreate gateway
-  wait_healthy
-  ok "随机访问目录已修改，旧目录立即失效"
-  show_access
-}
-
-change_host() {
-  require_install
-  local host="${2:-}"
-  [[ -n "$host" ]] || read -r -p "新的公网 IP 或域名: " host
-  [[ -n "$host" && ! "$host" =~ [[:space:]/] ]] || die "地址格式不正确"
-  set_key "$INSTALL_DIR/.env" PUBLIC_HOST "$host"
-  cd "$INSTALL_DIR"
-  docker compose up -d --force-recreate panel gateway xray
-  wait_healthy
-  ok "公开地址已修改"
-  show_access
-}
-
-show_status() {
-  require_install
-  cd "$INSTALL_DIR"
-  docker compose ps
-  show_access
-}
-
-restart_services() {
-  require_install
-  cd "$INSTALL_DIR"
-  docker compose restart
-  wait_healthy
-  ok "NodeLite 已重启并恢复健康"
+install_docker_mode() {
+  warn "Docker 是可选兼容模式，不是默认安装方式。"
+  local answer; read -r -p "确认安装/更新 Docker 兼容模式？[y/N]: " answer; [[ "$answer" =~ ^[Yy]$ ]] || return
+  ensure_tools; command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+  command -v git >/dev/null || die "Docker 兼容模式需要 git"
+  local dir="${NODELITE_DOCKER_DIR:-/opt/nodelite-docker}"
+  [[ -d "$dir/.git" ]] && { git -C "$dir" fetch origin main; git -C "$dir" reset --hard origin/main; } || git clone "https://github.com/$REPO.git" "$dir"
+  (cd "$dir" && NODELITE_DIR="$dir" bash install-docker.sh install)
 }
 
 run_tcpfit() {
-  ensure_dependencies
   cat <<'EOF'
-
-TCPFit 是独立的第三方系统调优工具，可能修改：
-- /etc/sysctl.d 内核网络参数
-- tc/qdisc 队列规则与默认路由参数
-- systemd 持久化服务
-- 可选 swap 配置
-
-它不是 NodeLite 的组成部分。脚本自身提供 status、verify 和 rollback，
-但任何网络调优都可能造成 SSH 波动，请确保你有云控制台/KVM 回退通道。
+TCPFit 是第三方系统调优工具，可能修改 sysctl、tc、systemd 与 swap，并可能造成 SSH 波动。
+请确保有云控制台/KVM 回退。NodeLite 永不自动执行 TCPFit。
 EOF
-  local answer
-  read -r -p "确认从 Kylin010/tcpfit 获取当前版本并进入其菜单？[y/N]: " answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { warn "已取消"; return 0; }
-
-  local commit tmp sha
-  commit="$(git ls-remote https://github.com/Kylin010/tcpfit.git refs/heads/main | awk 'NR==1{print $1}')"
-  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "无法解析 TCPFit 当前提交"
-  tmp="$(mktemp /tmp/tcpfit.XXXXXX.sh)"
-  trap 'rm -f "${tmp:-}"' RETURN
-  curl -fsSL "https://raw.githubusercontent.com/Kylin010/tcpfit/$commit/tcpfit.sh" -o "$tmp"
-  bash -n "$tmp" || die "TCPFit 脚本语法检查失败"
-  sha="$(sha256sum "$tmp" | awk '{print $1}')"
-  printf '来源提交：%s\n脚本 SHA256：%s\n' "$commit" "$sha"
-  bash "$tmp"
-  rm -f "$tmp"
-  trap - RETURN
+  local answer; read -r -p "确认进入 TCPFit 菜单？[y/N]: " answer; [[ "$answer" =~ ^[Yy]$ ]] || return
+  ensure_tools; local commit tmp sha; commit="$(git ls-remote https://github.com/Kylin010/tcpfit.git refs/heads/main | awk 'NR==1{print $1}')"; [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "无法固定 TCPFit 提交"
+  tmp="$(mktemp)"; curl -fsSL "https://raw.githubusercontent.com/Kylin010/tcpfit/$commit/tcpfit.sh" -o "$tmp"; bash -n "$tmp"; sha="$(sha256sum "$tmp" | awk '{print $1}')"; printf '提交：%s\nSHA256：%s\n' "$commit" "$sha"; bash "$tmp"; rm -f "$tmp"
 }
 
 uninstall_nodelite() {
-  require_install
-  local answer remove_data
-  read -r -p "确认停止并卸载 NodeLite？输入 YES 继续: " answer
-  [[ "$answer" == YES ]] || { warn "已取消"; return 0; }
-  read -r -p "同时删除数据库、节点和配置？[y/N]: " remove_data
-  cd "$INSTALL_DIR"
-  docker exec simple-node-netguard python3 /netguard.py rollback >/dev/null 2>&1 || true
-  docker compose down --remove-orphans
-  for shortcut in /usr/local/bin/node /usr/local/bin/nodelite; do
-    if grep -q 'NodeLite management shortcut' "$shortcut" 2>/dev/null; then
-      rm -f "$shortcut"
-    fi
-  done
-  if [[ "$remove_data" =~ ^[Yy]$ ]]; then
-    cd /
-    rm -rf --one-file-system "$INSTALL_DIR"
-    ok "NodeLite 与全部数据已删除"
-  else
-    ok "NodeLite 已停止，安装数据保留在 $INSTALL_DIR"
-  fi
+  require_native; local answer remove; read -r -p "输入 YES 确认卸载: " answer; [[ "$answer" == YES ]] || return; read -r -p "删除数据？[y/N]: " remove
+  "$INSTALL_DIR/bin/nodelite-netguard" rollback >/dev/null 2>&1 || true
+  service_ctl disable --now "${SERVICES[@]}" || true
+  local shortcut unit_path; for shortcut in "$BIN_DIR/node" "$BIN_DIR/nodelite"; do grep -q 'NodeLite management shortcut' "$shortcut" 2>/dev/null && rm -f "$shortcut"; done
+  for unit_path in "${SERVICES[@]}"; do rm -f "$SYSTEMD_DIR/$unit_path"; done
+  service_ctl daemon-reload
+  if [[ "$remove" =~ ^[Yy]$ ]]; then rm -rf --one-file-system "$INSTALL_DIR"; else warn "数据保留在 $INSTALL_DIR"; fi
+  ok "NodeLite 已卸载，Netguard 规则已回滚"
 }
 
 menu() {
-  while true; do
-    cat <<'EOF'
+  while true; do cat <<'EOF'
 
-============== NodeLite 管理菜单 ==============
-  1. 安装 / 更新
+============== NodeLite 原生管理菜单 ==============
+  1. 安装 / 更新（默认原生 systemd）
   2. 修改管理员账号密码
   3. 修改访问端口
   4. 更换随机访问目录
   5. 修改公网 IP / 域名
-  6. 查看运行状态与访问地址
+  6. 查看状态与访问地址
   7. 重启 NodeLite
-  8. TCPFit 网络调优（第三方，可回滚）
+  8. TCPFit 网络调优（第三方）
   9. 卸载 NodeLite
+ 10. 可选 Docker 兼容安装
   0. 退出
-===============================================
+===================================================
 EOF
-    local choice
-    read -r -p "请选择 [0-9]: " choice
-    case "$choice" in
-      1) install_or_update ;;
-      2) change_credentials ;;
-      3) change_port ;;
-      4) change_path ;;
-      5) change_host ;;
-      6) show_status ;;
-      7) restart_services ;;
-      8) run_tcpfit ;;
-      9) uninstall_nodelite ;;
-      0) exit 0 ;;
-      *) warn "无效选项" ;;
-    esac
-  done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) uninstall_nodelite;; 10) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"
-if [[ -z "$command" ]]; then
-  if [[ -t 0 ]]; then menu; else install_or_update; fi
-else
-  case "$command" in
-    install|update) install_or_update ;;
-    credentials) change_credentials "$@" ;;
-    port) change_port "$@" ;;
-    path) change_path "$@" ;;
-    host) change_host "$@" ;;
-    status) show_status ;;
-    restart) restart_services ;;
-    tcpfit) run_tcpfit ;;
-    uninstall) uninstall_nodelite ;;
-    menu) menu ;;
-    *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|uninstall|menu]" ;;
-  esac
-fi
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|uninstall|docker|menu]";; esac

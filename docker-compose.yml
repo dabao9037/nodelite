@@ -12,7 +12,7 @@ services:
       panel:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()==b'ok'"]
+      test: ["CMD", "python3", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok'"]
       interval: 20s
       timeout: 5s
       start_period: 10s
@@ -24,6 +24,7 @@ services:
     container_name: simple-node-panel
     restart: unless-stopped
     environment:
+      RUNTIME_BACKEND: docker
       DB_PATH: /data/panel.db
       PUBLIC_HOST: ${PUBLIC_HOST}
       XRAY_CONTAINER: simple-node-xray

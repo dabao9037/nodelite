@@ -18,7 +18,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile Python sources
-        run: python -m py_compile app/main.py netguard/netguard.py gateway/server.py
+        run: python -m py_compile app/main.py netguard/netguard.py gateway/server.py native/*.py
+      - name: Validate shell sources and native smoke
+        run: |
+          bash -n install.sh install-docker.sh scripts/*.sh
+          bash scripts/test-native-smoke.sh
       - name: Verify REALITY preset list
         run: |
           python - <<'PY'
@@ -46,6 +50,8 @@ jobs:
               assert f'value="{removed}"' not in page, removed
               assert removed not in script, removed
           assert "document.execCommand('copy')" in script
+          assert "await copyText(copy.dataset.copy)" in script
+          assert "await navigator.clipboard.writeText(copy.dataset.copy)" not in script
           PY
       - name: Verify release configuration
         run: |
@@ -54,13 +60,18 @@ jobs:
 
           compose = Path("docker-compose.yml").read_text(encoding="utf-8")
           installer = Path("install.sh").read_text(encoding="utf-8")
+          assert "RUNTIME_BACKEND: docker" in compose
           assert "ghcr.io/xtls/xray-core:26.6.27" in compose
           assert "ACCESS_PATH" in compose and "simple-node-gateway" in compose
           assert "ghcr.io/dabao9037/nodelite-panel:${IMAGE_TAG:-latest}" in compose
           assert Path("gateway/server.py").is_file()
           assert "TCPFit 网络调优" in installer
-          assert "docker compose pull gateway panel netguard xray" in installer
+          assert "nodelite-linux-$arch.tar.gz" in installer
+          assert "install_docker_mode" in installer
+          assert "systemctl" in installer
           assert "快捷命令已安装" in installer
+          assert Path(".github/workflows/native-release.yml").is_file()
+          assert Path("packaging/systemd/nodelite-panel.service").is_file()
           PY
       - name: Run unit tests
         run: |

@@ -11,8 +11,10 @@ ACCESS_PATH = os.environ.get("ACCESS_PATH", "").strip("/")
 if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", ACCESS_PATH):
     raise SystemExit("invalid ACCESS_PATH")
 PREFIX = f"/{ACCESS_PATH}"
-UPSTREAM_HOST = "panel"
-UPSTREAM_PORT = 8080
+UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "panel")
+UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "8080"))
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
+LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 
 
@@ -29,14 +31,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def health(self):
+        connection = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=3)
+        try:
+            connection.request("GET", "/healthz", headers={"Host": self.headers.get("Host", "")})
+            response = connection.getresponse()
+            payload = response.read()
+            self.send_response(response.status)
+            self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(payload)
+        except Exception as exc:
+            payload = f'{{"status":"degraded","gateway":"{type(exc).__name__}"}}'.encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(payload)
+        finally:
+            connection.close()
+
     def proxy(self):
         if self.path == "/healthz":
-            body = b"ok"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.health()
             return
         if self.path == PREFIX:
             self.send_empty(308, PREFIX + "/")
@@ -92,4 +112,9 @@ class Handler(BaseHTTPRequestHandler):
     do_PATCH = proxy
 
 
-ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+def main():
+    ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

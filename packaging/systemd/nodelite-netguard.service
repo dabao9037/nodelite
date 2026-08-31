@@ -1,0 +1,24 @@
+[Unit]
+Description=NodeLite connection limit guard
+After=network-online.target
+Wants=network-online.target
+Before=nodelite-panel.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/opt/nodelite/config/nodelite.env
+ExecStart=/opt/nodelite/bin/nodelite-netguard daemon
+ExecStopPost=-/opt/nodelite/bin/nodelite-netguard rollback
+Restart=on-failure
+RestartSec=3
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/nodelite/data
+
+[Install]
+WantedBy=multi-user.target

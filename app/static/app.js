@@ -236,7 +236,7 @@ $('#list').addEventListener('click', async event => {
   const remove = event.target.closest('[data-delete]');
   try {
     if (copy) {
-      await navigator.clipboard.writeText(copy.dataset.copy);
+      await copyText(copy.dataset.copy);
       copy.textContent = '已复制';
       setTimeout(() => copy.textContent = '复制', 1000);
     } else if (edit) {

@@ -20,6 +20,7 @@ def panel(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_" + "PASSWORD", "correct-horse")
     monkeypatch.setenv("APP_" + "SECRET", "test-signing-value")
     monkeypatch.setenv("PUBLIC_HOST", "node.example.test")
+    monkeypatch.setenv("RUNTIME_BACKEND", "docker")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "panel.db"))
     monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
     monkeypatch.setenv("NETGUARD_REQUIRED", "0")
@@ -135,6 +136,8 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     assert "updateRealityPreset" in script
     assert "`${value}:443`" in script
     assert "document.execCommand('copy')" in script
+    assert "await copyText(copy.dataset.copy)" in script
+    assert "await navigator.clipboard.writeText(copy.dataset.copy)" not in script
 
 
 def test_create_edit_validation_and_defaults(panel, monkeypatch):
@@ -274,6 +277,53 @@ def test_rebuild_validates_then_restarts_and_rolls_back(panel, monkeypatch):
     assert json.loads(module.XRAY_CONFIG_PATH.read_text()) == {"known": "good"}
 
 
+def test_native_backend_does_not_import_docker_and_whitelists_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "x")
+    monkeypatch.setenv("APP_" + "SECRET", "y")
+    monkeypatch.setenv("RUNTIME_BACKEND", "native")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "native.db"))
+    monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    sys.modules.pop("app.main", None)
+    before = sys.modules.get("docker")
+    module = importlib.import_module("app.main")
+    assert module.docker is None
+    assert sys.modules.get("docker") is before
+    with pytest.raises(RuntimeError, match="non-whitelisted"):
+        module._systemctl("stop", module.XRAY_SERVICE)
+    with pytest.raises(RuntimeError, match="non-whitelisted"):
+        module._systemctl("restart", "ssh.service")
+
+
+def test_native_rebuild_validates_fixed_binary_then_restarts_service(panel, monkeypatch):
+    module, _ = panel
+    module.XRAY_CONFIG_PATH.write_text('{"old": true}', encoding="utf-8")
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "RUNTIME_BACKEND", "native")
+    monkeypatch.setattr(module, "NATIVE_XRAY_BIN", Path("/fixed/xray"))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return type("R", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setattr(module, "_systemctl", lambda action, service: calls.append(["systemctl", action, service]) or "")
+    module.rebuild()
+    assert calls[0] == ["/fixed/xray", "run", "-test", "-config", str(module.XRAY_CONFIG_PATH)]
+    assert calls[1] == ["systemctl", "restart", "nodelite-xray.service"]
+
+
+def test_native_health_is_strict(panel, monkeypatch):
+    module, client = panel
+    monkeypatch.setattr(module, "RUNTIME_BACKEND", "native")
+    monkeypatch.setattr(module, "NETGUARD_REQUIRED", True)
+    monkeypatch.setattr(module, "native_service_status", lambda service: "running" if service == module.XRAY_SERVICE else "unavailable")
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+
+
 def load_netguard(tmp_path, monkeypatch):
     path = Path(__file__).parents[1] / "netguard" / "netguard.py"
     spec = importlib.util.spec_from_file_location("netguard_test", path)
@@ -351,6 +401,22 @@ def test_connlimit_rule_generation_and_rollback(tmp_path, monkeypatch):
     guard.rollback()
     assert ("iptables", "-D", "INPUT", "-j", guard.CHAIN) in rollback_commands
     assert rollback_commands[-1] == ("iptables", "-X", guard.CHAIN)
+
+
+def test_netguard_daemon_rolls_back_on_sigterm_path(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(guard, "reconcile", lambda: calls.append("reconcile") or [])
+    monkeypatch.setattr(guard, "rollback", lambda: calls.append("rollback"))
+    monkeypatch.setattr(guard.time, "monotonic", lambda: 0)
+
+    def sleep(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(guard.time, "sleep", sleep)
+    with pytest.raises(KeyboardInterrupt):
+        guard.daemon(0.5)
+    assert calls == ["reconcile", "rollback"]
 
 
 def test_netguard_active_connection_mapping(tmp_path, monkeypatch):

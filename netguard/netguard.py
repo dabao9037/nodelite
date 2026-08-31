@@ -11,6 +11,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -132,6 +134,53 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def daemon(interval: float = 2.0, health_socket: str | None = None):
+    """Continuously restore desired rules and always roll them back on exit."""
+    stopping = False
+    listener = None
+    socket_path = health_socket or os.getenv("NETGUARD_SOCKET", "")
+    if socket_path:
+        os.makedirs(os.path.dirname(socket_path), exist_ok=True)
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(socket_path)
+        listener.listen(4)
+        listener.setblocking(False)
+        os.chmod(socket_path, 0o660)
+
+    def stop(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        while not stopping:
+            reconcile()
+            if listener:
+                try:
+                    client, _ = listener.accept()
+                except BlockingIOError:
+                    pass
+                else:
+                    with client:
+                        client.sendall((json.dumps(health(), separators=(",", ":")) + "\n").encode())
+            deadline = time.monotonic() + interval
+            while not stopping and time.monotonic() < deadline:
+                time.sleep(min(0.2, deadline - time.monotonic()))
+    finally:
+        rollback()
+        if listener:
+            listener.close()
+            try:
+                os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
+
+
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "reconcile":
@@ -151,8 +200,13 @@ def main():
     elif command == "rollback":
         rollback()
         print("{}")
+    elif command == "daemon":
+        interval = float(os.getenv("NETGUARD_INTERVAL_SECONDS", "2"))
+        if not 0.5 <= interval <= 300:
+            raise ValueError("invalid daemon interval")
+        daemon(interval)
     else:
-        print("usage: netguard.py reconcile|status <port...>|rules|health|rollback", file=sys.stderr)
+        print("usage: netguard.py reconcile|status <port...>|rules|health|rollback|daemon", file=sys.stderr)
         raise SystemExit(64)
 
 

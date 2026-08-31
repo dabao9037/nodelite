@@ -4,12 +4,14 @@ import base64
 import binascii
 import hashlib
 import hmac
+import importlib
 import json
 import os
 import re
 import secrets
 import socket
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -20,25 +22,41 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlencode
 
-import docker
 import qrcode
-from docker.errors import DockerException, NotFound
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("DB_PATH", "/data/panel.db"))
-XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", "/xray-config/config.json"))
+RUNTIME_BACKEND = os.getenv("RUNTIME_BACKEND", "native").strip().lower()
+if RUNTIME_BACKEND not in {"native", "docker"}:
+    raise RuntimeError("RUNTIME_BACKEND must be native or docker")
+NODELITE_HOME = Path(os.getenv("NODELITE_HOME", "/opt/nodelite"))
+DB_PATH = Path(os.getenv("DB_PATH", str(NODELITE_HOME / "data/panel.db") if RUNTIME_BACKEND == "native" else "/data/panel.db"))
+XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", str(NODELITE_HOME / "xray-config/config.json") if RUNTIME_BACKEND == "native" else "/xray-config/config.json"))
 XRAY_CONTAINER = os.getenv("XRAY_CONTAINER", "simple-node-xray")
 NETGUARD_CONTAINER = os.getenv("NETGUARD_CONTAINER", "simple-node-netguard")
+XRAY_SERVICE = "nodelite-xray.service"
+NETGUARD_SERVICE = "nodelite-netguard.service"
+NATIVE_XRAY_BIN = NODELITE_HOME / "bin/xray"
+NATIVE_NETGUARD_BIN = NODELITE_HOME / "bin/nodelite-netguard"
+NATIVE_NETGUARD_SOCKET = Path(os.getenv("NETGUARD_SOCKET", "/run/nodelite/netguard.sock"))
 NETGUARD_REQUIRED = os.getenv("NETGUARD_REQUIRED", "1") != "0"
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_CREDENTIAL = os.getenv("ADMIN_" + "PASSWORD", "")
 SIGNING_SECRET = os.getenv("APP_" + "SECRET", "")
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
 BACKGROUND_INTERVAL = max(1.0, float(os.getenv("BACKGROUND_INTERVAL_SECONDS", "2")))
+
+if RUNTIME_BACKEND == "native":
+    # The native process neither imports nor connects to Docker.
+    docker = None
+    DockerException = NotFound = ()
+else:
+    docker = importlib.import_module("docker")
+    DockerException = docker.errors.DockerException
+    NotFound = docker.errors.NotFound
 
 SS2022_METHOD = "2022-blake3-aes-128-gcm"
 SS2022_KEY_BYTES = 16
@@ -154,20 +172,68 @@ def require_admin(request: Request):
     raise HTTPException(401, "请先登录")
 
 
+def _run_native(command: list[str], *, failure_status: int = 500) -> str:
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(failure_status, f"本地服务命令失败：{exc}") from exc
+    text = (result.stdout or result.stderr).strip()
+    if result.returncode:
+        raise HTTPException(failure_status, text or "本地服务命令失败")
+    return text
+
+
+def _systemctl(action: str, service: str, *, failure_status: int = 500) -> str:
+    if action not in {"is-active", "restart"} or service not in {XRAY_SERVICE, NETGUARD_SERVICE}:
+        raise RuntimeError("refusing non-whitelisted systemctl operation")
+    return _run_native(["systemctl", action, service], failure_status=failure_status)
+
+
+def _native_netguard_health() -> bool:
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2)
+        try:
+            client.connect(str(NATIVE_NETGUARD_SOCKET))
+            payload = client.recv(4096)
+        finally:
+            client.close()
+        return json.loads(payload.decode()).get("status") == "ok"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def native_service_status(service: str) -> str:
+    try:
+        value = _systemctl("is-active", service, failure_status=503)
+        running = value == "active"
+        if running and service == NETGUARD_SERVICE:
+            running = _native_netguard_health()
+        return "running" if running else (value if value != "active" else "unhealthy")
+    except HTTPException:
+        return "unavailable"
+
+
 def docker_client():
+    if RUNTIME_BACKEND != "docker":
+        raise RuntimeError("Docker API is disabled by the native runtime backend")
     try:
         return docker.DockerClient(base_url="unix://var/run/docker.sock")
-    except DockerException as exc:
-        raise HTTPException(500, f"Docker 连接失败：{exc}") from exc
+    except Exception as exc:
+        if DockerException and isinstance(exc, DockerException):
+            raise HTTPException(500, f"Docker 连接失败：{exc}") from exc
+        raise
 
 
 def named_container(name: str):
     try:
         return docker_client().containers.get(name)
-    except NotFound:
-        return None
-    except DockerException as exc:
-        raise HTTPException(500, f"读取容器失败：{exc}") from exc
+    except Exception as exc:
+        if NotFound and isinstance(exc, NotFound):
+            return None
+        if DockerException and isinstance(exc, DockerException):
+            raise HTTPException(500, f"读取容器失败：{exc}") from exc
+        raise
 
 
 def xray_container():
@@ -175,6 +241,8 @@ def xray_container():
 
 
 def xray_exec(*args):
+    if RUNTIME_BACKEND == "native":
+        return _run_native([str(NATIVE_XRAY_BIN), *args], failure_status=503)
     container = xray_container()
     if not container:
         raise HTTPException(503, "Xray 尚未启动")
@@ -188,6 +256,8 @@ def xray_exec(*args):
 def netguard_exec(*args):
     if not NETGUARD_REQUIRED:
         return "{}"
+    if RUNTIME_BACKEND == "native":
+        return _run_native([str(NATIVE_NETGUARD_BIN), *args], failure_status=503)
     container = named_container(NETGUARD_CONTAINER)
     if not container:
         raise HTTPException(503, "连接限制执行器尚未启动")
@@ -455,6 +525,18 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
         return dict(TELEMETRY)
 
 
+def validate_native_xray_config():
+    try:
+        result = subprocess.run(
+            [str(NATIVE_XRAY_BIN), "run", "-test", "-config", str(XRAY_CONFIG_PATH)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise HTTPException(422, f"无法执行 Xray 配置验证：{exc}") from exc
+    if result.returncode:
+        raise HTTPException(422, (result.stderr or result.stdout).strip())
+
+
 def rebuild():
     global RUNTIME_DIRTY
     with STATE_LOCK:
@@ -465,21 +547,32 @@ def rebuild():
         rows = current_rows()
         old = XRAY_CONFIG_PATH.read_bytes() if XRAY_CONFIG_PATH.exists() else None
         write_config(rows)
-        container = xray_container()
-        if not container:
-            RUNTIME_DIRTY = True
-            return
-        check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
-        if check.exit_code:
-            if old is not None:
-                XRAY_CONFIG_PATH.write_bytes(old)
-            else:
-                XRAY_CONFIG_PATH.unlink(missing_ok=True)
-            raise HTTPException(422, check.output.decode(errors="replace"))
         raw_snapshot = {
             row["id"]: (int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"])) for row in current_rows()
         }
-        container.restart(timeout=15)
+        if RUNTIME_BACKEND == "native":
+            try:
+                validate_native_xray_config()
+            except HTTPException:
+                if old is not None:
+                    XRAY_CONFIG_PATH.write_bytes(old)
+                else:
+                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
+                raise
+            _systemctl("restart", XRAY_SERVICE)
+        else:
+            container = xray_container()
+            if not container:
+                RUNTIME_DIRTY = True
+                return
+            check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
+            if check.exit_code:
+                if old is not None:
+                    XRAY_CONFIG_PATH.write_bytes(old)
+                else:
+                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
+                raise HTTPException(422, check.output.decode(errors="replace"))
+            container.restart(timeout=15)
         with closing(connect_db()) as conn:
             for node_id, (raw_up, raw_down) in raw_snapshot.items():
                 conn.execute(
@@ -637,22 +730,29 @@ async def handle_http(request, exc):
 
 @app.get("/healthz")
 def healthz():
-    statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
-    for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
-        if key == "netguard" and not NETGUARD_REQUIRED:
-            continue
-        try:
-            container = named_container(name)
-            if container:
-                container.reload()
-                statuses[key] = "running" if container.status == "running" else container.status
-            else:
-                statuses[key] = "starting"
-        except HTTPException:
-            pass
+    if RUNTIME_BACKEND == "native":
+        statuses = {
+            "xray": native_service_status(XRAY_SERVICE),
+            "netguard": "disabled" if not NETGUARD_REQUIRED else native_service_status(NETGUARD_SERVICE),
+        }
+    else:
+        statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
+        for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
+            if key == "netguard" and not NETGUARD_REQUIRED:
+                continue
+            try:
+                container = named_container(name)
+                if container:
+                    container.reload()
+                    statuses[key] = "running" if container.status == "running" else container.status
+                else:
+                    statuses[key] = "starting"
+            except HTTPException:
+                pass
     with closing(connect_db()) as conn:
         conn.execute("SELECT 1").fetchone()
-    return {"status": "ok", **statuses}
+    healthy = statuses["xray"] == "running" and statuses["netguard"] in {"running", "disabled"}
+    return JSONResponse({"status": "ok" if healthy else "degraded", **statuses}, status_code=200 if healthy else 503)
 
 
 @app.get("/login", response_class=HTMLResponse, response_model=None)

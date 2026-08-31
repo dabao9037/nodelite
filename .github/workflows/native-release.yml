@@ -1,0 +1,36 @@
+name: native-release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build standalone one-dir tarball with Xray 26.6.27
+        run: bash scripts/build-native-release.sh "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodelite-linux-${{ matrix.arch }}
+          path: dist/*
+      - name: Attach assets to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

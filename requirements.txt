@@ -2,4 +2,6 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 qrcode[pil]==8.2
+# Docker SDK is loaded only when RUNTIME_BACKEND=docker. Native release builds
+# install requirements-native.txt and do not bundle or import it.
 docker==7.1.0

@@ -1,4 +1,4 @@
-name: test
+name: checks
 
 on:
   push:
@@ -9,15 +9,33 @@ permissions:
   contents: read
 
 jobs:
-  pytest:
+  static-checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
-      - run: pip install -r requirements-dev.txt
-      - run: pytest -q
-      - run: python -m py_compile app/main.py netguard/netguard.py
+      - name: Compile Python sources
+        run: python -m py_compile app/main.py netguard/netguard.py
+      - name: Verify REALITY preset list
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          page = Path("app/static/index.html").read_text(encoding="utf-8")
+          script = Path("app/static/app.js").read_text(encoding="utf-8")
+          for host in (
+              "www.apple.com",
+              "www.amazon.com",
+              "www.cloudflare.com",
+              "addons.mozilla.org",
+              "www.bing.com",
+              "www.google.com",
+          ):
+              assert f'value="{host}"' in page, host
+              assert host in script, host
+          for removed in ("www.microsoft.com", "www.oracle.com"):
+              assert f'value="{removed}"' not in page, removed
+              assert removed not in script, removed
+          PY

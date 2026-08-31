@@ -20,7 +20,23 @@
 - Xray Core `26.2.6`
 - 独立 Netguard 容器，通过 iptables `connlimit` 管理每节点连接上限
 
-## 快速开始
+## 一键安装
+
+要求：Ubuntu、Debian、CentOS、Rocky Linux 或 AlmaLinux，使用 root 运行。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh | bash
+```
+
+默认使用服务器公网 IPv4、端口 `2060`，并自动生成登录密码。也可以自定义：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh | PUBLIC_HOST=node.example.com PANEL_PORT=2060 ADMIN_USER=admin bash
+```
+
+安装完成后，终端会显示访问地址、用户名和随机密码。
+
+## 手动安装
 
 ### 1. 准备配置
 

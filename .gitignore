@@ -1,0 +1,32 @@
+# Runtime secrets and local state
+.env
+.env.*
+!.env.example
+data/
+xray-config/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local diagnostics and temporary files
+tmp/
+*.log
+*.tgz
+*.tar.gz
+tlsrg.txt
+toolprobe.txt

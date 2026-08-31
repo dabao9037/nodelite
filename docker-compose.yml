@@ -1,0 +1,68 @@
+services:
+  panel:
+    build: .
+    container_name: simple-node-panel
+    restart: unless-stopped
+    environment:
+      DB_PATH: /data/panel.db
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      XRAY_CONTAINER: simple-node-xray
+      NETGUARD_CONTAINER: simple-node-netguard
+      NETGUARD_REQUIRED: "1"
+      XRAY_CONFIG_PATH: /xray-config/config.json
+      BACKGROUND_INTERVAL_SECONDS: "2"
+    env_file:
+      - .env.credentials
+    volumes:
+      - ./data:/data
+      - ./xray-config:/xray-config
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${PANEL_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok' and d['netguard']=='running'"]
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      netguard:
+        condition: service_healthy
+
+  netguard:
+    build: ./netguard
+    container_name: simple-node-netguard
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      DB_PATH: /data/panel.db
+    volumes:
+      - ./data:/data:ro
+    healthcheck:
+      test: ["CMD", "python3", "/netguard.py", "rules"]
+      interval: 20s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  xray:
+    # Pin the version that passes the production REALITY-client acceptance gate.
+    image: ghcr.io/xtls/xray-core:26.2.6
+    container_name: simple-node-xray
+    restart: unless-stopped
+    network_mode: host
+    command: ["run", "-config", "/etc/xray/config.json"]
+    volumes:
+      - ./xray-config:/etc/xray:ro
+    depends_on:
+      panel:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "xray", "run", "-test", "-config", "/etc/xray/config.json"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3

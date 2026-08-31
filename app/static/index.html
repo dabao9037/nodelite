@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f2ec">
+  <meta name="robots" content="noindex,nofollow">
+  <title>NodeLite</title>
+  <link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand"><b>N</b><span>NODELITE</span></div>
+      <form method="post" action="logout"><button class="ghost">退出</button></form>
+    </header>
+    <section class="hero">
+      <p class="eyebrow">MINIMAL XRAY NODE PANEL</p>
+      <h1>节点管理，<em>实时可控。</em></h1>
+      <p>SOCKS、Shadowsocks 2022 和 VLESS + Reality，带真实流量、有效期和服务端并发限制。</p>
+    </section>
+    <section class="builder">
+      <div class="protocol-picker">
+        <button class="protocol active" type="button" data-proto="socks">SOCKS<small>账号密码代理</small></button>
+        <button class="protocol" type="button" data-proto="shadowsocks">SS-2022<small>现代 Shadowsocks</small></button>
+        <button class="protocol" type="button" data-proto="vless">VLESS Reality<small>Vision + Reality</small></button>
+      </div>
+      <form id="createForm">
+        <input type="hidden" id="protocol" value="socks">
+        <div class="form-grid">
+          <label>节点名称<input id="name" required placeholder="例如：新加坡-01"></label>
+          <label>端口<input id="port" type="number" min="1" max="65535" placeholder="留空自动生成"></label>
+          <label class="socks-field">用户名<input id="username" placeholder="留空自动生成"></label>
+          <label class="socks-field">密码<input id="password" placeholder="留空自动生成"></label>
+          <label class="ss-field" hidden>SS-2022 密钥<input id="ssPassword" placeholder="留空自动生成 16 字节 Base64 密钥"></label>
+          <label class="vless-field" hidden>伪装目标
+            <select id="realityPreset">
+              <option value="www.apple.com">Apple（推荐）</option>
+              <option value="www.amazon.com">Amazon</option>
+              <option value="www.cloudflare.com">Cloudflare</option>
+              <option value="addons.mozilla.org">Mozilla Add-ons</option>
+              <option value="www.bing.com">Bing</option>
+              <option value="www.google.com">Google</option>
+              <option value="custom">自定义域名</option>
+            </select>
+            <small>以上预设均已从本服务器验证 TLS 1.3 和证书匹配；目标可用性可能随网络变化。</small>
+          </label>
+          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.apple.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
+          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.apple.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
+          <label>有效期
+            <select id="expirationMode">
+              <option value="never">永不过期</option>
+              <option value="date">指定日期</option>
+              <option value="days">指定天数</option>
+            </select>
+          </label>
+          <label id="expirationDateField" hidden>到期日期<input id="expiresAt" type="datetime-local"></label>
+          <label id="expirationDaysField" hidden>有效天数<input id="expiresInDays" type="number" min="1" max="3650" value="30"></label>
+          <label>最大并发连接<input id="maxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+        </div>
+        <div id="error" class="error" role="alert" hidden></div>
+        <button class="primary">生成节点 <b>→</b></button>
+      </form>
+    </section>
+    <section class="nodes">
+      <div class="title">
+        <div><p class="eyebrow">LIVE NODE CONTROLS</p><h2>节点列表</h2><small class="live-note">每 2 秒刷新流量速率与活动连接数</small></div>
+        <button id="refresh" class="circle" type="button" aria-label="刷新节点列表">↻</button>
+      </div>
+      <div id="empty" class="empty">还没有节点，从上方创建第一个。</div>
+      <div id="list"></div>
+    </section>
+    <footer>NodeLite · Xray 节点控制面板</footer>
+  </main>
+
+  <dialog id="editDialog">
+    <form id="editForm" method="dialog">
+      <input id="editId" type="hidden">
+      <h2>编辑节点控制</h2>
+      <label>节点名称<input id="editName" required></label>
+      <label>最大并发连接<input id="editMaxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+      <label>有效期
+        <select id="editExpirationMode">
+          <option value="never">永不过期</option>
+          <option value="date">指定日期</option>
+          <option value="days">从现在起指定天数</option>
+        </select>
+      </label>
+      <label id="editExpirationDateField" hidden>到期日期<input id="editExpiresAt" type="datetime-local"></label>
+      <label id="editExpirationDaysField" hidden>有效天数<input id="editExpiresInDays" type="number" min="1" max="3650" value="30"></label>
+      <div class="dialog-actions"><button id="editCancel" type="button">取消</button><button class="primary" type="submit">保存</button></div>
+    </form>
+  </dialog>
+  <script src="static/app.js"></script>
+</body>
+</html>

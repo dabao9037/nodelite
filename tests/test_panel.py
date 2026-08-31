@@ -116,22 +116,23 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     login(client)
     home = client.get("/")
     assert home.status_code == 200
-    apple_option = '<option value="www.apple.com">Apple（推荐）</option>'
-    assert apple_option in home.text
+    default_option = '<option value="www.cern.ch">CERN · 欧洲核子研究中心（推荐）</option>'
+    assert default_option in home.text
     for host in (
-        "www.apple.com", "www.bing.com", "www.microsoft.com",
-        "learn.microsoft.com", "www.samsung.com", "www.asus.com",
+        "www.cern.ch", "www.nature.com", "www.visitfinland.com",
+        "www.animenewsnetwork.com", "www.gog.com", "www.backblaze.com",
     ):
         assert f'value="{host}"' in home.text
     for removed_host in (
-        "www.amazon.com", "www.cloudflare.com", "addons.mozilla.org",
-        "www.google.com", "www.oracle.com",
+        "www.apple.com", "www.bing.com", "www.microsoft.com", "learn.microsoft.com",
+        "www.samsung.com", "www.asus.com", "www.amazon.com", "www.cloudflare.com",
+        "addons.mozilla.org", "www.google.com", "www.oracle.com",
     ):
         assert f'value="{removed_host}"' not in home.text
     assert 'value="custom"' in home.text
-    assert '<input id="serverName" value="www.apple.com">' in home.text
-    assert '<input id="destination" value="www.apple.com:443">' in home.text
-    assert module.reality_values(None, None) == ("www.apple.com", "www.apple.com:443")
+    assert '<input id="serverName" value="www.cern.ch">' in home.text
+    assert '<input id="destination" value="www.cern.ch:443">' in home.text
+    assert module.reality_values(None, None) == ("www.cern.ch", "www.cern.ch:443")
     script = (Path(module.BASE_DIR) / "static/app.js").read_text()
     assert "updateRealityPreset" in script
     assert "`${value}:443`" in script

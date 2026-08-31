@@ -159,8 +159,8 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.apple.com', 'www.bing.com', 'www.microsoft.com',
-  'learn.microsoft.com', 'www.samsung.com', 'www.asus.com'
+  'www.cern.ch', 'www.nature.com', 'www.visitfinland.com',
+  'www.animenewsnetwork.com', 'www.gog.com', 'www.backblaze.com'
 ]);
 
 function updateRealityPreset() {

@@ -95,7 +95,17 @@ bash scripts/build-native-release.sh amd64
 
 ## Reality 伪装目标
 
-内置 Apple、Bing、Microsoft、Microsoft Learn、Samsung、ASUS 和自定义目标。实际可用性仍取决于服务器出口与目标站点策略。
+内置预设改为相对小众、但仍由稳定机构长期运营的境外站点：
+
+- CERN（欧洲核子研究中心，默认）
+- Nature（学术出版）
+- Visit Finland（芬兰旅游）
+- Anime News Network（动漫资讯）
+- GOG（游戏发行平台）
+- Backblaze（云存储企业）
+- 自定义
+
+这些候选覆盖学术、旅游、游戏和小众企业方向，并要求证书与 SNI 匹配、支持 TLS 1.3。Reality 目标的可用性会随服务器出口网络和目标站点策略变化，部署后仍应使用真实客户端测试。随机、小型个人站点可能随时下线，不建议作为长期默认目标。
 
 ## TCPFit
 

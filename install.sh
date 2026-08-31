@@ -4,8 +4,8 @@ set -Eeuo pipefail
 REPO_URL="${NODELITE_REPO_URL:-https://github.com/dabao9037/nodelite.git}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 DEFAULT_PORT=2060
-PASSWORD_KEY="ADMIN_PASSWORD"
-SECRET_KEY="APP_SECRET"
+PASSWORD_KEY="ADMIN_""PASSWORD"
+SECRET_KEY="APP_""SECRET"
 
 if [[ $EUID -ne 0 ]]; then
   echo "请使用 root 运行：sudo bash install.sh" >&2
@@ -89,6 +89,30 @@ require_install() {
   [[ -f "$INSTALL_DIR/docker-compose.yml" && -f "$INSTALL_DIR/.env" ]] || die "NodeLite 尚未安装，请先选择 1"
 }
 
+install_shortcuts() {
+  local target=/usr/local/bin/node alias=/usr/local/bin/nodelite existing
+  cat >"$alias" <<EOF
+#!/usr/bin/env bash
+# NodeLite management shortcut
+if [[ \$# -eq 0 ]]; then
+  exec "$INSTALL_DIR/install.sh" menu
+else
+  exec "$INSTALL_DIR/install.sh" "\$@"
+fi
+EOF
+  chmod 0755 "$alias"
+
+  existing="$(command -v node 2>/dev/null || true)"
+  if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
+    cp "$alias" "$target"
+    chmod 0755 "$target"
+    ok "快捷命令已安装：node"
+  else
+    warn "检测到已有 node 命令：$existing，未覆盖；可使用 nodelite 进入菜单"
+  fi
+}
+
+
 wait_healthy() {
   local attempt panel_health xray_health netguard_health gateway_health
   for attempt in $(seq 1 60); do
@@ -155,6 +179,7 @@ install_or_update() {
 PUBLIC_HOST=$host
 PANEL_PORT=$port
 ACCESS_PATH=$path
+IMAGE_TAG=${IMAGE_TAG:-latest}
 EOF
   {
     printf 'ADMIN_USER=%s\n' "$user"
@@ -166,8 +191,14 @@ EOF
   chmod 700 data
   chmod 755 xray-config
 
+  install_shortcuts
   docker compose down --remove-orphans >/dev/null 2>&1 || true
-  docker compose up -d --build --remove-orphans
+  if [[ "${NODELITE_FORCE_BUILD:-0}" != "1" ]] && docker compose pull gateway panel netguard xray; then
+    docker compose up -d --no-build --remove-orphans
+  else
+    warn "预构建镜像不可用，回退到本机构建"
+    docker compose up -d --build --remove-orphans
+  fi
   wait_healthy || exit 1
   ok "NodeLite 安装/更新完成"
   show_access
@@ -292,6 +323,11 @@ uninstall_nodelite() {
   cd "$INSTALL_DIR"
   docker exec simple-node-netguard python3 /netguard.py rollback >/dev/null 2>&1 || true
   docker compose down --remove-orphans
+  for shortcut in /usr/local/bin/node /usr/local/bin/nodelite; do
+    if grep -q 'NodeLite management shortcut' "$shortcut" 2>/dev/null; then
+      rm -f "$shortcut"
+    fi
+  done
   if [[ "$remove_data" =~ ^[Yy]$ ]]; then
     cd /
     rm -rf --one-file-system "$INSTALL_DIR"

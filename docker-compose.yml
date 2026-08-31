@@ -1,12 +1,11 @@
 services:
   gateway:
     build: ./gateway
+    image: ghcr.io/dabao9037/nodelite-gateway:${IMAGE_TAG:-latest}
     container_name: simple-node-gateway
     restart: unless-stopped
     environment:
       ACCESS_PATH: ${ACCESS_PATH}
-    volumes:
-      - ./gateway/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     ports:
       - "${PANEL_PORT}:8080"
     depends_on:
@@ -21,6 +20,7 @@ services:
 
   panel:
     build: .
+    image: ghcr.io/dabao9037/nodelite-panel:${IMAGE_TAG:-latest}
     container_name: simple-node-panel
     restart: unless-stopped
     environment:
@@ -49,6 +49,7 @@ services:
 
   netguard:
     build: ./netguard
+    image: ghcr.io/dabao9037/nodelite-netguard:${IMAGE_TAG:-latest}
     container_name: simple-node-netguard
     restart: unless-stopped
     network_mode: host

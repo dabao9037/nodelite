@@ -101,6 +101,27 @@ async function refreshTelemetry() {
   });
 }
 
+
+async function copyText(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  input.style.top = '0';
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw Error('复制失败，请手动复制链接');
+}
+
 function showError(error) {
   $('#error').textContent = error.message || String(error);
   $('#error').hidden = false;
@@ -138,8 +159,8 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.apple.com', 'www.amazon.com', 'www.cloudflare.com',
-  'addons.mozilla.org', 'www.bing.com'
+  'www.apple.com', 'www.bing.com', 'www.microsoft.com',
+  'learn.microsoft.com', 'www.samsung.com', 'www.asus.com'
 ]);
 
 function updateRealityPreset() {

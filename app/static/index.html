@@ -36,13 +36,14 @@
           <label class="vless-field" hidden>伪装目标
             <select id="realityPreset">
               <option value="www.apple.com">Apple（推荐）</option>
-              <option value="www.amazon.com">Amazon</option>
-              <option value="www.cloudflare.com">Cloudflare</option>
-              <option value="addons.mozilla.org">Mozilla Add-ons</option>
               <option value="www.bing.com">Bing</option>
+              <option value="www.microsoft.com">Microsoft</option>
+              <option value="learn.microsoft.com">Microsoft Learn</option>
+              <option value="www.samsung.com">Samsung</option>
+              <option value="www.asus.com">ASUS</option>
               <option value="custom">自定义域名</option>
             </select>
-            <small>以上预设均已从本服务器验证 TLS 1.3 和证书匹配；目标可用性可能随网络变化。</small>
+            <small>优先选择中国大陆通常可访问、支持 TLS 1.3 和证书匹配的目标；实际可用性仍以部署服务器实测为准。</small>
           </label>
           <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.apple.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
           <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.apple.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>

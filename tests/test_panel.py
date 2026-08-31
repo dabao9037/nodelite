@@ -118,11 +118,14 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     apple_option = '<option value="www.apple.com">Apple（推荐）</option>'
     assert apple_option in home.text
     for host in (
-        "www.apple.com", "www.amazon.com", "www.cloudflare.com",
-        "addons.mozilla.org", "www.bing.com",
+        "www.apple.com", "www.bing.com", "www.microsoft.com",
+        "learn.microsoft.com", "www.samsung.com", "www.asus.com",
     ):
         assert f'value="{host}"' in home.text
-    for removed_host in ("www.microsoft.com", "www.oracle.com", "www.google.com"):
+    for removed_host in (
+        "www.amazon.com", "www.cloudflare.com", "addons.mozilla.org",
+        "www.google.com", "www.oracle.com",
+    ):
         assert f'value="{removed_host}"' not in home.text
     assert 'value="custom"' in home.text
     assert '<input id="serverName" value="www.apple.com">' in home.text
@@ -131,6 +134,7 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     script = (Path(module.BASE_DIR) / "static/app.js").read_text()
     assert "updateRealityPreset" in script
     assert "`${value}:443`" in script
+    assert "document.execCommand('copy')" in script
 
 
 def test_create_edit_validation_and_defaults(panel, monkeypatch):

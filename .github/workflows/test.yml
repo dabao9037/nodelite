@@ -81,6 +81,7 @@ jobs:
         run: |
           bash scripts/test-installer-wait.sh
           bash scripts/test-installer-fail-fast.sh
+          bash scripts/test-installer-process-substitution.sh
 
   fresh-install:
     runs-on: ubuntu-latest

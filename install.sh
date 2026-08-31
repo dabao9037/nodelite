@@ -56,13 +56,17 @@ require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/
 save_installer() {
   local destination="$1" source="${BASH_SOURCE[0]:-}"
   mkdir -p "$(dirname "$destination")"
-  [[ "$source" == "$destination" ]] && return 0
-  if [[ -n "$source" && -r "$source" && "$source" != bash && "$source" != /usr/bin/bash && "$source" != /bin/bash ]]; then
+  [[ "$source" == "$destination" ]] && bash -n "$destination" 2>/dev/null && return 0
+  case "$source" in
+    ""|bash|/bin/bash|/usr/bin/bash|/dev/fd/*|/proc/*/fd/*) source="" ;;
+  esac
+  if [[ -n "$source" && -f "$source" && -r "$source" ]]; then
     install -m 0755 "$source" "$destination"
   else
     curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$destination"
     chmod 0755 "$destination"
   fi
+  bash -n "$destination" || die "保存的 NodeLite 管理脚本不完整"
 }
 
 stop_legacy_docker() {
@@ -112,8 +116,9 @@ preflight_port() {
 
 install_shortcuts() {
   mkdir -p "$BIN_DIR"
-  local alias="$BIN_DIR/nodelite" target="$BIN_DIR/node" existing
-  cat >"$alias" <<EOF
+  local alias="$BIN_DIR/nodelite" target="$BIN_DIR/node" existing temporary changed=0
+  temporary="$(mktemp)"
+  cat >"$temporary" <<EOF
 #!/usr/bin/env bash
 # NodeLite management shortcut
 if [[ \$# -eq 0 ]]; then
@@ -122,10 +127,15 @@ else
   exec "$INSTALL_DIR/install.sh" "\$@"
 fi
 EOF
-  chmod 0755 "$alias"
+  if [[ ! -f "$alias" ]] || ! cmp -s "$temporary" "$alias"; then
+    install -m 0755 "$temporary" "$alias"
+    changed=1
+  fi
+  rm -f "$temporary"
   existing="$(command -v node 2>/dev/null || true)"
   if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
-    cp "$alias" "$target"; chmod 0755 "$target"; ok "快捷命令已安装：node"
+    if [[ ! -f "$target" ]] || ! cmp -s "$alias" "$target"; then install -m 0755 "$alias" "$target"; changed=1; fi
+    (( changed == 0 )) || ok "快捷命令已安装：node"
   else warn "检测到已有 Node.js：$existing，未覆盖；请使用 nodelite"; fi
 }
 
@@ -275,7 +285,7 @@ install_or_update() {
 {"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"blocked"}]}
 JSON
   fi
-  install_units; install_shortcuts
+  install_units
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
   wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"

@@ -24,7 +24,19 @@ curl() {
   printf '%s\n' '{"status":"ok","xray":"running","netguard":"running"}'
 }
 sleep() { :; }
-service_ctl() { :; }
+service_ctl() {
+  case "${1:-}" in
+    show)
+      case "$3" in
+        --property=ActiveState) printf 'activating\n' ;;
+        --property=SubState) printf 'start\n' ;;
+        --property=NRestarts) printf '0\n' ;;
+        --property=Result) printf 'success\n' ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+}
 die() { echo "unexpected die: $*" >&2; return 1; }
 
 stderr="$TMP/stderr"

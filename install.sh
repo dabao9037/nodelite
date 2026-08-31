@@ -27,14 +27,21 @@ have_systemd() { command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/syst
 service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"; }
 
 ensure_tools() {
-  local missing=() cmd
-  for cmd in curl tar openssl; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
+  local missing=() packages=() cmd
+  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
   ((${#missing[@]} == 0)) && return
   warn "仅安装缺失的基础工具：${missing[*]}"
-  if command -v apt-get >/dev/null; then apt-get update && apt-get install -y ca-certificates curl tar openssl
-  elif command -v dnf >/dev/null; then dnf install -y ca-certificates curl tar openssl
-  elif command -v yum >/dev/null; then yum install -y ca-certificates curl tar openssl
-  else die "请先安装 curl、tar、openssl"; fi
+  if command -v apt-get >/dev/null; then
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute2);; *) packages+=("$cmd");; esac; done
+    apt-get update && apt-get install -y ca-certificates "${packages[@]}"
+  elif command -v dnf >/dev/null; then
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
+    dnf install -y ca-certificates "${packages[@]}"
+  elif command -v yum >/dev/null; then
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
+    yum install -y ca-certificates "${packages[@]}"
+  else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
+  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
 }
 
 asset_arch() {
@@ -45,6 +52,31 @@ latest_tag() {
   curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
+
+stop_legacy_docker() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local name running=()
+  for name in simple-node-gateway simple-node-panel simple-node-xray simple-node-netguard; do
+    [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)" == true ]] && running+=("$name")
+  done
+  ((${#running[@]} == 0)) && return 0
+  info "检测到旧 NodeLite Docker 服务，切换原生模式并停止旧容器（数据和镜像保留）"
+  docker stop -t 3 "${running[@]}" >/dev/null || die "停止旧 NodeLite Docker 容器失败"
+}
+
+port_in_use() {
+  local port="$1"
+  ss -H -ltn 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$" {found=1} END {exit !found}'
+}
+
+preflight_port() {
+  local port="$1"
+  if port_in_use "$port" && ! service_ctl is-active --quiet nodelite-gateway.service 2>/dev/null; then
+    warn "访问端口 $port 已被其他程序占用："
+    ss -H -ltnp 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$"' >&2 || true
+    die "请先释放端口 $port，或用 PANEL_PORT=其他端口 重新安装"
+  fi
+}
 
 install_shortcuts() {
   mkdir -p "$BIN_DIR"
@@ -108,19 +140,68 @@ install_units() {
   service_ctl enable "${SERVICES[@]}"
 }
 
+service_states() {
+  local unit state substate restarts result output=()
+  for unit in "${SERVICES[@]}"; do
+    state="$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+    substate="$(service_ctl show "$unit" --property=SubState --value 2>/dev/null || true)"
+    restarts="$(service_ctl show "$unit" --property=NRestarts --value 2>/dev/null || true)"
+    result="$(service_ctl show "$unit" --property=Result --value 2>/dev/null || true)"
+    output+=("${unit#nodelite-}=${state:-unknown}/${substate:-unknown},重启=${restarts:-0},结果=${result:-unknown}")
+  done
+  printf '%s' "${output[*]}"
+}
+
+diagnose_services() {
+  local unit
+  warn "NodeLite 服务诊断：$(service_states)"
+  for unit in "${SERVICES[@]}"; do
+    warn "$unit 最近日志："
+    journalctl -u "$unit" --no-pager -n 12 2>/dev/null || service_ctl --no-pager --full status "$unit" || true
+  done
+}
+
+service_crash_loop() {
+  local unit="$1" state restarts result
+  state="$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
+  restarts="$(service_ctl show "$unit" --property=NRestarts --value 2>/dev/null || true)"
+  result="$(service_ctl show "$unit" --property=Result --value 2>/dev/null || true)"
+  [[ "$state" == failed ]] || { [[ "$state" != active ]] && { [[ "$restarts" =~ ^[0-9]+$ && "$restarts" -gt 0 ]] || [[ -n "$result" && "$result" != success ]]; }; }
+}
+
 wait_healthy() {
-  local i response health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
-  for i in $(seq 1 60); do
+  local i unit response health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
+  for i in $(seq 1 45); do
     # Connection refused is expected for the first few seconds after systemd
     # starts the gateway. Capture it silently instead of presenting a normal
     # startup race as an installation error.
     response="$(curl -fs --connect-timeout 1 --max-time 3 "$health" 2>/dev/null || true)"
     if [[ "$response" == *'"status":"ok"'* ]]; then return 0; fi
-    (( i % 5 != 0 )) || info "等待服务启动……（$((i * 2)) 秒）"
-    sleep 2
+    if (( i >= 3 )); then
+      for unit in "${SERVICES[@]}"; do
+        if service_crash_loop "$unit"; then
+          diagnose_services
+          die "$unit 启动后发生崩溃/重启，请查看上方日志"
+        fi
+      done
+    fi
+    if (( i >= 5 )) && [[ "$response" == *'"status":"degraded"'* ]]; then
+      diagnose_services
+      die "服务健康检查失败：$response"
+    fi
+    if (( i == 10 )); then
+      for unit in "${SERVICES[@]}"; do
+        if [[ "$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)" != active ]]; then
+          diagnose_services
+          die "$unit 10 秒内未进入 active 状态"
+        fi
+      done
+    fi
+    (( i % 5 != 0 )) || info "服务启动中（${i} 秒）：$(service_states)"
+    sleep 1
   done
-  service_ctl --no-pager --full status "${SERVICES[@]}" || true
-  die "服务未在规定时间内恢复健康"
+  diagnose_services
+  die "服务 45 秒内未恢复健康，请查看上方状态"
 }
 show_access() {
   local f="$INSTALL_DIR/config/nodelite.env"
@@ -130,7 +211,8 @@ show_access() {
 
 install_or_update() {
   ensure_tools
-  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret
+  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret had_existing=0
+  [[ -f "$old" ]] && had_existing=1
   arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
   url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/nodelite-linux-$arch.tar.gz}"
   host="${PUBLIC_HOST:-$(read_key "$old" PUBLIC_HOST)}"; [[ -n "$host" ]] || host="$(curl -4fsS --max-time 8 https://api.ipify.org || hostname -I | awk '{print $1}')"
@@ -142,6 +224,8 @@ install_or_update() {
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
   info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
   tar -tzf "$tmp/release.tar.gz" >/dev/null
+  stop_legacy_docker
+  preflight_port "$port"
   mkdir -p "$INSTALL_DIR"; tar -xzf "$tmp/release.tar.gz" -C "$INSTALL_DIR"
   cp "$0" "$INSTALL_DIR/install.sh"; chmod 0755 "$INSTALL_DIR/install.sh"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
@@ -153,7 +237,7 @@ JSON
   install_units; install_shortcuts
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
   wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
-  [[ -f "$old" ]] || printf '密码：%s\n' "$password"
+  (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
 change_value_restart() {

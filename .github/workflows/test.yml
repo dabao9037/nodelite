@@ -78,7 +78,9 @@ jobs:
           python -m pip install -r requirements-dev.txt
           PYTHONPATH=. pytest -q
       - name: Verify installer tolerates transient connection refusal
-        run: bash scripts/test-installer-wait.sh
+        run: |
+          bash scripts/test-installer-wait.sh
+          bash scripts/test-installer-fail-fast.sh
 
   fresh-install:
     runs-on: ubuntu-latest

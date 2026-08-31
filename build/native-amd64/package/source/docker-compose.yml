@@ -1,0 +1,89 @@
+services:
+  gateway:
+    build: ./gateway
+    image: ghcr.io/dabao9037/nodelite-gateway:${IMAGE_TAG:-latest}
+    container_name: simple-node-gateway
+    restart: unless-stopped
+    environment:
+      ACCESS_PATH: ${ACCESS_PATH}
+    ports:
+      - "${PANEL_PORT}:8080"
+    depends_on:
+      panel:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok'"]
+      interval: 20s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  panel:
+    build: .
+    image: ghcr.io/dabao9037/nodelite-panel:${IMAGE_TAG:-latest}
+    container_name: simple-node-panel
+    restart: unless-stopped
+    environment:
+      RUNTIME_BACKEND: docker
+      DB_PATH: /data/panel.db
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      XRAY_CONTAINER: simple-node-xray
+      NETGUARD_CONTAINER: simple-node-netguard
+      NETGUARD_REQUIRED: "1"
+      XRAY_CONFIG_PATH: /xray-config/config.json
+      BACKGROUND_INTERVAL_SECONDS: "2"
+    env_file:
+      - .env.credentials
+    volumes:
+      - ./data:/data
+      - ./xray-config:/xray-config
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok' and d['netguard']=='running'"]
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      netguard:
+        condition: service_healthy
+
+  netguard:
+    build: ./netguard
+    image: ghcr.io/dabao9037/nodelite-netguard:${IMAGE_TAG:-latest}
+    container_name: simple-node-netguard
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      DB_PATH: /data/panel.db
+    volumes:
+      - ./data:/data:ro
+    healthcheck:
+      test: ["CMD", "python3", "/netguard.py", "health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  xray:
+    image: ghcr.io/xtls/xray-core:26.6.27
+    container_name: simple-node-xray
+    restart: unless-stopped
+    network_mode: host
+    command: ["run", "-config", "/etc/xray/config.json"]
+    volumes:
+      - ./xray-config:/etc/xray:ro
+    depends_on:
+      panel:
+        # Panel health reports Xray state, so waiting for panel health here
+        # would deadlock the cold-start dependency graph.
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "xray", "run", "-test", "-config", "/etc/xray/config.json"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07100d">
+  <meta name="robots" content="noindex,nofollow">
+  <title>安全登录 · NodeLite</title>
+  <link rel="stylesheet" href="static/app.css">
+</head>
+<body class="login-body">
+  <a class="skip-link" href="#login-form">跳到登录表单</a>
+  <main class="login-shell" aria-labelledby="login-title">
+    <section class="login-brand" aria-label="NodeLite 产品介绍">
+      <div class="login-brand-top">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <path d="M8.5 23.5v-15l15 15v-15"/>
+              <path d="M8.5 8.5h5l10 10"/>
+            </svg>
+          </span>
+          <span>
+            <strong>NodeLite</strong>
+            <small>PRIVATE CONTROL PLANE</small>
+          </span>
+        </div>
+        <div class="status-pill"><i aria-hidden="true"></i>本地部署</div>
+      </div>
+
+      <div class="brand-message">
+        <p class="eyebrow light">SECURE NODE OPERATIONS</p>
+        <h1>一处掌控，<br><em>三种核心协议。</em></h1>
+        <p>为私有服务器设计的轻量管理面板。配置 SOCKS、Shadowsocks 2022 与 VLESS Reality，不引入不必要的复杂度。</p>
+      </div>
+
+      <div class="protocol-row" aria-label="支持的协议">
+        <span><i aria-hidden="true">01</i> SOCKS</span>
+        <span><i aria-hidden="true">02</i> SS-2022</span>
+        <span><i aria-hidden="true">03</i> VLESS REALITY</span>
+      </div>
+      <div class="brand-grid" aria-hidden="true"></div>
+      <div class="brand-orbit orbit-one" aria-hidden="true"></div>
+      <div class="brand-orbit orbit-two" aria-hidden="true"></div>
+    </section>
+
+    <section class="login-panel">
+      <div class="login-card">
+        <div class="login-heading">
+          <p class="eyebrow">ADMINISTRATION</p>
+          <h2 id="login-title">欢迎回来</h2>
+          <p class="muted">验证管理员身份后进入 NodeLite 控制台。</p>
+        </div>
+
+        <div id="login-error" class="login-error" role="alert" aria-live="polite" {error_hidden}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 3.7 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z"/></svg>
+          <span>{error_message}</span>
+        </div>
+
+        <form id="login-form" class="login-form" method="post" action="login" novalidate>
+          <div class="field-group">
+            <label for="username">管理员账号</label>
+            <div class="input-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0m8-10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/></svg>
+              <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="输入管理员账号" required autofocus {invalid}>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <div class="label-row">
+              <label for="login-password">管理员密码</label>
+              <span>区分大小写</span>
+            </div>
+            <div class="input-wrap password-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3m-11 0h12a2 2 0 0 1 2 2v8H4v-8a2 2 0 0 1 2-2Zm6 4v2"/></svg>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码" required {invalid}>
+              <button class="password-toggle" type="button" aria-label="显示密码" aria-controls="login-password" aria-pressed="false">
+                <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+                <svg class="eye-closed" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18M10.6 6.1A10 10 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-2.1 2.8M6.2 6.2C3.8 8 2.5 12 2.5 12s3.5 6 9.5 6a9 9 0 0 0 3-.5M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <p id="client-error" class="field-error" role="alert" hidden>请输入管理员账号和密码。</p>
+          <button class="login-submit" type="submit">
+            <span>安全进入控制台</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+          </button>
+        </form>
+
+        <div class="security-note">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 3v5c0 4.7-2.9 8.4-7 10-4.1-1.6-7-5.3-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+          <span><strong>私有访问</strong> · 登录凭据仅由当前部署验证</span>
+        </div>
+      </div>
+
+      <footer class="login-footer">
+        <span>NodeLite Control Plane</span>
+        <span>Self-hosted · Minimal · Focused</span>
+      </footer>
+    </section>
+  </main>
+  <script src="static/login.js"></script>
+</body>
+</html>

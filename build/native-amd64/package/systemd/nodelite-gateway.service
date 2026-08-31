@@ -1,0 +1,19 @@
+[Unit]
+Description=NodeLite random-path gateway
+After=network-online.target nodelite-panel.service
+Wants=network-online.target nodelite-panel.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/opt/nodelite/config/nodelite.env
+ExecStart=/opt/nodelite/bin/nodelite-gateway
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=NodeLite Xray Core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/opt/nodelite/bin/xray run -test -config /opt/nodelite/xray-config/config.json
+ExecStart=/opt/nodelite/bin/xray run -config /opt/nodelite/xray-config/config.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/nodelite/xray-config
+
+[Install]
+WantedBy=multi-user.target

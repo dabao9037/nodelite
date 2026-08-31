@@ -332,7 +332,7 @@ def ss2022_key(value: str | None = None):
 
 
 def reality_values(server_name: str | None, destination: str | None):
-    name = (server_name or "www.cern.ch").strip()
+    name = (server_name or "www.apple.com").strip()
     if not name or "://" in name or any(character in name for character in "/?# "):
         raise HTTPException(422, "SNI 域名格式不正确")
     target = (destination or f"{name}:443").strip()

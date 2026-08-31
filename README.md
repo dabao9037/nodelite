@@ -95,17 +95,17 @@ bash scripts/build-native-release.sh amd64
 
 ## Reality 伪装目标
 
-内置预设改为相对小众、但仍由稳定机构长期运营的境外站点：
+内置目标按地区分组，每个地区提供两个候选：
 
-- CERN（欧洲核子研究中心，默认）
-- Nature（学术出版）
-- Visit Finland（芬兰旅游）
-- Anime News Network（动漫资讯）
-- GOG（游戏发行平台）
-- Backblaze（云存储企业）
+- 美国：Apple、Microsoft
+- 英国：BBC、GOV.UK
+- 日本：Sony、Nintendo
+- 东南亚：Singapore Airlines、DBS（新加坡）
+- 欧洲：CERN（瑞士）、IKEA（瑞典）
+- 香港：Cathay Pacific、Hang Seng Bank
 - 自定义
 
-这些候选覆盖学术、旅游、游戏和小众企业方向，并要求证书与 SNI 匹配、支持 TLS 1.3。Reality 目标的可用性会随服务器出口网络和目标站点策略变化，部署后仍应使用真实客户端测试。随机、小型个人站点可能随时下线，不建议作为长期默认目标。
+以上域名在发布前均检查 DNS、443 端口、TLS 1.3 和证书主机名匹配；默认使用 Apple。Reality 目标的可用性仍会随服务器出口网络和目标站点策略变化，部署后应使用真实客户端测试。
 
 ## TCPFit
 

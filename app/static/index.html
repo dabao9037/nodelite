@@ -35,18 +35,36 @@
           <label class="ss-field" hidden>SS-2022 密钥<input id="ssPassword" placeholder="留空自动生成 16 字节 Base64 密钥"></label>
           <label class="vless-field" hidden>伪装目标
             <select id="realityPreset">
-              <option value="www.cern.ch">CERN · 欧洲核子研究中心（推荐）</option>
-              <option value="www.nature.com">Nature · 学术出版</option>
-              <option value="www.visitfinland.com">Visit Finland · 芬兰旅游</option>
-              <option value="www.animenewsnetwork.com">Anime News Network · 动漫资讯</option>
-              <option value="www.gog.com">GOG · 游戏平台</option>
-              <option value="www.backblaze.com">Backblaze · 云存储</option>
+              <optgroup label="美国">
+                <option value="www.apple.com">Apple · 美国（推荐）</option>
+                <option value="www.microsoft.com">Microsoft · 美国</option>
+              </optgroup>
+              <optgroup label="英国">
+                <option value="www.bbc.co.uk">BBC · 英国</option>
+                <option value="www.gov.uk">GOV.UK · 英国政府</option>
+              </optgroup>
+              <optgroup label="日本">
+                <option value="www.sony.jp">Sony · 日本</option>
+                <option value="www.nintendo.co.jp">Nintendo · 日本</option>
+              </optgroup>
+              <optgroup label="东南亚">
+                <option value="www.singaporeair.com">Singapore Airlines · 新加坡</option>
+                <option value="www.dbs.com">DBS · 新加坡</option>
+              </optgroup>
+              <optgroup label="欧洲">
+                <option value="www.cern.ch">CERN · 瑞士</option>
+                <option value="www.ikea.com">IKEA · 瑞典</option>
+              </optgroup>
+              <optgroup label="香港">
+                <option value="www.cathaypacific.com">Cathay Pacific · 香港</option>
+                <option value="www.hangseng.com">Hang Seng Bank · 香港</option>
+              </optgroup>
               <option value="custom">自定义域名</option>
             </select>
-            <small>优先选择中国大陆通常可访问、支持 TLS 1.3 和证书匹配的目标；实际可用性仍以部署服务器实测为准。</small>
+            <small>按地区各提供两个已验证支持 TLS 1.3、证书匹配的目标；实际可用性仍以部署服务器实测为准。</small>
           </label>
-          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.cern.ch"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
-          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.cern.ch:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
+          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.apple.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
+          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.apple.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
           <label>有效期
             <select id="expirationMode">
               <option value="never">永不过期</option>

@@ -75,7 +75,10 @@ APP_SECRET=$APP_SECRET
 EOF
 chmod 600 .env .env.credentials
 mkdir -p data xray-config
-chmod 700 data xray-config
+chmod 700 data
+# Xray runs as uid 65532 and must be able to traverse this bind-mounted
+# directory. Config files themselves contain no panel credentials.
+chmod 755 xray-config
 
 docker compose up -d --build
 

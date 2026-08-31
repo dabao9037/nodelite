@@ -285,6 +285,47 @@ def load_netguard(tmp_path, monkeypatch):
     return module
 
 
+def test_netguard_cold_start_without_database(tmp_path, monkeypatch):
+    path = Path(__file__).parents[1] / "netguard" / "netguard.py"
+    spec = importlib.util.spec_from_file_location("netguard_cold_start_test", path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DB_PATH", str(tmp_path / "not-created-yet.db"))
+    assert module.desired_rules(now=20) == []
+
+    commands = []
+    monkeypatch.setattr(module, "ensure_jump", lambda: commands.append(("ensure",)))
+    monkeypatch.setattr(module, "run", lambda *args, check=True: commands.append(args) or "")
+    assert module.reconcile() == []
+    assert commands == [("ensure",), ("iptables", "-F", module.CHAIN)]
+
+
+def test_netguard_reads_live_wal_data(tmp_path, monkeypatch):
+    path = Path(__file__).parents[1] / "netguard" / "netguard.py"
+    spec = importlib.util.spec_from_file_location("netguard_wal_test", path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    db = tmp_path / "wal.db"
+    writer = sqlite3.connect(db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,expires_at INTEGER)")
+    writer.execute("INSERT INTO nodes VALUES(1,30001,1,2,NULL)")
+    writer.commit()
+    monkeypatch.setattr(module, "DB_PATH", str(db))
+    assert module.desired_rules(now=20) == [(1, 30001, 2)]
+    writer.close()
+
+
+def test_netguard_health_fails_when_iptables_probe_fails(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+
+    def failed_probe(*args, **kwargs):
+        raise RuntimeError("iptables unavailable")
+
+    monkeypatch.setattr(guard, "run", failed_probe)
+    with pytest.raises(RuntimeError, match="iptables unavailable"):
+        guard.health()
+
+
 def test_connlimit_rule_generation_and_rollback(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
     assert guard.desired_rules(now=20) == [(1, 30001, 2)]

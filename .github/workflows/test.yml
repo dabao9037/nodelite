@@ -39,3 +39,14 @@ jobs:
               assert f'value="{removed}"' not in page, removed
               assert removed not in script, removed
           PY
+      - name: Run unit tests
+        run: |
+          python -m pip install -r requirements-dev.txt
+          PYTHONPATH=. pytest -q
+
+  fresh-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify empty-directory Compose startup
+        run: sudo NODELITE_FRESH_INSTALL_TEST=1 bash scripts/test-fresh-install.sh

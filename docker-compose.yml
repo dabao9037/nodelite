@@ -42,7 +42,7 @@ services:
     volumes:
       - ./data:/data:ro
     healthcheck:
-      test: ["CMD", "python3", "/netguard.py", "rules"]
+      test: ["CMD", "python3", "/netguard.py", "health"]
       interval: 20s
       timeout: 5s
       start_period: 5s
@@ -59,7 +59,9 @@ services:
       - ./xray-config:/etc/xray:ro
     depends_on:
       panel:
-        condition: service_healthy
+        # Xray may start after the panel process is running; waiting for panel
+        # health would deadlock because panel health intentionally checks Xray.
+        condition: service_started
     healthcheck:
       test: ["CMD", "xray", "run", "-test", "-config", "/etc/xray/config.json"]
       interval: 30s

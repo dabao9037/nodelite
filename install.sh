@@ -109,9 +109,14 @@ install_units() {
 }
 
 wait_healthy() {
-  local i health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
+  local i response health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
   for i in $(seq 1 60); do
-    if curl -fsS --max-time 3 "$health" | grep -q '"status":"ok"'; then return; fi
+    # Connection refused is expected for the first few seconds after systemd
+    # starts the gateway. Capture it silently instead of presenting a normal
+    # startup race as an installation error.
+    response="$(curl -fs --connect-timeout 1 --max-time 3 "$health" 2>/dev/null || true)"
+    if [[ "$response" == *'"status":"ok"'* ]]; then return 0; fi
+    (( i % 5 != 0 )) || info "等待服务启动……（$((i * 2)) 秒）"
     sleep 2
   done
   service_ctl --no-pager --full status "${SERVICES[@]}" || true

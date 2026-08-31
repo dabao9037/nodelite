@@ -53,6 +53,18 @@ latest_tag() {
 }
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
 
+save_installer() {
+  local destination="$1" source="${BASH_SOURCE[0]:-}"
+  mkdir -p "$(dirname "$destination")"
+  [[ "$source" == "$destination" ]] && return 0
+  if [[ -n "$source" && -r "$source" && "$source" != bash && "$source" != /usr/bin/bash && "$source" != /bin/bash ]]; then
+    install -m 0755 "$source" "$destination"
+  else
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$destination"
+    chmod 0755 "$destination"
+  fi
+}
+
 stop_legacy_docker() {
   command -v docker >/dev/null 2>&1 || return 0
   local name running=()
@@ -67,6 +79,26 @@ stop_legacy_docker() {
 port_in_use() {
   local port="$1"
   ss -H -ltn 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$" {found=1} END {exit !found}'
+}
+
+stop_native_for_upgrade() {
+  have_systemd || return 0
+  local found=0 unit
+  for unit in "${SERVICES[@]}"; do [[ -e "$SYSTEMD_DIR/$unit" ]] && found=1; done
+  (( found == 1 )) || return 0
+  info "停止现有 NodeLite 原生服务，准备平滑更新"
+  service_ctl stop nodelite-gateway.service nodelite-panel.service nodelite-xray.service nodelite-netguard.service || true
+}
+
+choose_internal_port() {
+  local preferred="${1:-$INTERNAL_PORT}" candidate
+  if ! port_in_use "$preferred"; then INTERNAL_PORT="$preferred"; return 0; fi
+  warn "内部端口 127.0.0.1:$preferred 被残留进程占用，自动选择新端口"
+  ss -H -ltnp 2>/dev/null | awk -v suffix=":$preferred" '$4 ~ suffix "$"' >&2 || true
+  for candidate in $(seq 18081 18180); do
+    if ! port_in_use "$candidate"; then INTERNAL_PORT="$candidate"; info "新的 Panel 内部端口：127.0.0.1:$INTERNAL_PORT"; return 0; fi
+  done
+  die "无法找到可用的 Panel 内部端口（18081-18180）"
 }
 
 preflight_port() {
@@ -95,6 +127,12 @@ EOF
   if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
     cp "$alias" "$target"; chmod 0755 "$target"; ok "快捷命令已安装：node"
   else warn "检测到已有 Node.js：$existing，未覆盖；请使用 nodelite"; fi
+}
+
+bootstrap_menu() {
+  save_installer "$INSTALL_DIR/install.sh"
+  install_shortcuts
+  menu
 }
 
 write_environment() {
@@ -211,7 +249,7 @@ show_access() {
 
 install_or_update() {
   ensure_tools
-  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret had_existing=0
+  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret old_internal had_existing=0
   [[ -f "$old" ]] && had_existing=1
   arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
   url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/nodelite-linux-$arch.tar.gz}"
@@ -221,13 +259,16 @@ install_or_update() {
   user="${ADMIN_USER:-$(read_key "$old" ADMIN_USER)}"; user="${user:-admin}"
   password="${!PASSWORD_KEY:-$(read_key "$old" "$PASSWORD_KEY")}"; password="${password:-$(random_password)}"
   secret="${!SECRET_KEY:-$(read_key "$old" "$SECRET_KEY")}"; secret="${secret:-$(random_secret)}"
+  old_internal="$(read_key "$old" PANEL_INTERNAL_PORT)"
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
   info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
   tar -tzf "$tmp/release.tar.gz" >/dev/null
   stop_legacy_docker
+  stop_native_for_upgrade
   preflight_port "$port"
+  choose_internal_port "$old_internal"
   mkdir -p "$INSTALL_DIR"; tar -xzf "$tmp/release.tar.gz" -C "$INSTALL_DIR"
-  cp "$0" "$INSTALL_DIR/install.sh"; chmod 0755 "$INSTALL_DIR/install.sh"
+  save_installer "$INSTALL_DIR/install.sh"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'
@@ -301,4 +342,4 @@ EOF
   local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) uninstall_nodelite;; 10) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|uninstall|docker|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|uninstall|docker|menu]";; esac

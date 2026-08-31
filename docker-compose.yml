@@ -1,4 +1,24 @@
 services:
+  gateway:
+    build: ./gateway
+    container_name: simple-node-gateway
+    restart: unless-stopped
+    environment:
+      ACCESS_PATH: ${ACCESS_PATH}
+    volumes:
+      - ./gateway/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "${PANEL_PORT}:8080"
+    depends_on:
+      panel:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()==b'ok'"]
+      interval: 20s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
   panel:
     build: .
     container_name: simple-node-panel
@@ -17,8 +37,6 @@ services:
       - ./data:/data
       - ./xray-config:/xray-config
       - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "${PANEL_PORT}:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok' and d['netguard']=='running'"]
       interval: 20s
@@ -49,8 +67,7 @@ services:
       retries: 3
 
   xray:
-    # Pin the version that passes the production REALITY-client acceptance gate.
-    image: ghcr.io/xtls/xray-core:26.2.6
+    image: ghcr.io/xtls/xray-core:26.6.27
     container_name: simple-node-xray
     restart: unless-stopped
     network_mode: host
@@ -59,8 +76,8 @@ services:
       - ./xray-config:/etc/xray:ro
     depends_on:
       panel:
-        # Xray may start after the panel process is running; waiting for panel
-        # health would deadlock because panel health intentionally checks Xray.
+        # Panel health reports Xray state, so waiting for panel health here
+        # would deadlock the cold-start dependency graph.
         condition: service_started
     healthcheck:
       test: ["CMD", "xray", "run", "-test", "-config", "/etc/xray/config.json"]

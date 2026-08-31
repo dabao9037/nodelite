@@ -26,6 +26,7 @@ chmod 755 xray-config
 cat >.env <<EOF
 PUBLIC_HOST=127.0.0.1
 PANEL_PORT=$PANEL_PORT
+ACCESS_PATH=panel-fresh-test
 EOF
 cat >.env.credentials <<'EOF'
 ADMIN_USER=admin
@@ -37,26 +38,30 @@ chmod 600 .env .env.credentials
 docker compose up -d --build
 
 for attempt in $(seq 1 60); do
+  gateway_health="$(docker inspect simple-node-gateway --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
   panel_health="$(docker inspect simple-node-panel --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
   xray_health="$(docker inspect simple-node-xray --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
   netguard_health="$(docker inspect simple-node-netguard --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-  if [[ "$panel_health" == healthy && "$xray_health" == healthy && "$netguard_health" == healthy ]]; then
+  if [[ "$gateway_health" == healthy && "$panel_health" == healthy && "$xray_health" == healthy && "$netguard_health" == healthy ]]; then
     break
   fi
   if [[ "$attempt" == 60 ]]; then
     docker compose ps -a
-    docker compose logs --tail=150 panel xray netguard
+    docker compose logs --tail=150 gateway panel xray netguard
     exit 1
   fi
   sleep 2
 done
 
-curl -fsS --max-time 5 "http://127.0.0.1:$PANEL_PORT/healthz" \
+test "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PANEL_PORT/")" = 404
+curl -fsS --max-time 5 "http://127.0.0.1:$PANEL_PORT/panel-fresh-test/healthz" \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d == {"status":"ok","xray":"running","netguard":"running"}, d'
+test "$(docker inspect simple-node-gateway --format '{{.RestartCount}}')" = 0
+test "$(docker inspect simple-node-gateway --format '{{.RestartCount}}')" = 0
 test "$(docker inspect simple-node-panel --format '{{.RestartCount}}')" = 0
 test "$(docker inspect simple-node-netguard --format '{{.RestartCount}}')" = 0
 test "$(docker inspect simple-node-xray --format '{{.RestartCount}}')" = 0
 docker exec simple-node-netguard python3 /netguard.py reconcile >/dev/null
 docker exec simple-node-xray xray run -test -config /etc/xray/config.json >/dev/null
 
-echo "FRESH_INSTALL_OK panel=$panel_health xray=$xray_health netguard=$netguard_health"
+echo "FRESH_INSTALL_OK gateway=$gateway_health panel=$panel_health xray=$xray_health netguard=$netguard_health"

@@ -7,7 +7,7 @@ set -euo pipefail
 BASE_URL="${PANEL_BASE_URL:-https://s.165789.xyz/node-panel/}"
 ADMIN_USER_VALUE="${PANEL_ADMIN_USER:-admin}"
 ADMIN_PASS_VALUE="${PANEL_ADMIN_PASSWORD:-admin}"
-XRAY_IMAGE="${XRAY_CLIENT_IMAGE:-ghcr.io/xtls/xray-core:26.2.6}"
+XRAY_IMAGE="${XRAY_CLIENT_IMAGE:-ghcr.io/xtls/xray-core:26.6.27}"
 HTTPS_URL="${VLESS_TEST_URL:-https://www.cloudflare.com/cdn-cgi/trace}"
 ARTIFACT_DIR="${VLESS_ARTIFACT_DIR:-$(mktemp -d)}"
 SOCKS_PORT="${VLESS_SOCKS_PORT:-10818}"

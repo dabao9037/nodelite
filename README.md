@@ -1,192 +1,143 @@
 # NodeLite
 
-一个轻量的自托管节点管理面板，支持：
+轻量级自托管代理节点面板，支持 SOCKS5、Shadowsocks 2022 和 VLESS REALITY。
 
-- SOCKS5
-- Shadowsocks 2022
-- VLESS + REALITY + XTLS Vision
-- 节点创建、编辑、启停、删除和二维码
-- 流量累计、实时速率和当前 TCP 连接数
-- 节点有效期与到期自动停用
-- 每节点最大并发连接限制
-- 根路径与反向代理子路径部署
+## 主要能力
 
-> 仅用于你有权管理的服务器和合规网络环境。请遵守当地法律、服务商条款及组织安全政策。
+- SOCKS5、Shadowsocks 2022、VLESS REALITY 节点创建与管理
+- 节点二维码、链接、启停、到期时间、流量与连接数统计
+- 每节点连接数限制
+- 随机后台访问目录：裸 `IP:端口` 返回 404
+- 菜单式安装、更新和维护
+- Xray Core `26.6.27`
+- 独立 Netguard 容器，通过 iptables `connlimit` 管理连接限制
 
-## 技术栈
+## 一键菜单
 
-- FastAPI + SQLite
-- Docker Compose
-- Xray Core `26.2.6`
-- 独立 Netguard 容器，通过 iptables `connlimit` 管理每节点连接上限
+要求 root 权限，支持 Ubuntu、Debian、CentOS、Rocky Linux 和 AlmaLinux：
 
-## 一键安装
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh)
+```
 
-要求：Ubuntu、Debian、CentOS、Rocky Linux 或 AlmaLinux，使用 root 运行。
+菜单包括：
+
+```text
+1. 安装 / 更新
+2. 修改管理员账号密码
+3. 修改访问端口
+4. 更换随机访问目录
+5. 修改公网 IP / 域名
+6. 查看运行状态与访问地址
+7. 重启 NodeLite
+8. TCPFit 网络调优（第三方，可回滚）
+9. 卸载 NodeLite
+0. 退出
+```
+
+安装后会显示类似地址：
+
+```text
+http://服务器IP:2060/panel-a1b2c3d4e5f6a7b8/login
+```
+
+直接访问 `http://服务器IP:2060/` 会返回 404。随机目录不是身份认证的替代品，仍需使用强密码并限制防火墙来源。
+
+### 非交互安装
+
+管道执行仍保持兼容：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh | bash
 ```
 
-默认使用服务器公网 IPv4、端口 `2060`，并自动生成登录密码。也可以自定义：
+可自定义：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh | PUBLIC_HOST=node.example.com PANEL_PORT=2060 ADMIN_USER=admin bash
+curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh \
+  | PUBLIC_HOST=node.example.com PANEL_PORT=2060 ACCESS_PATH=panel-my-secret ADMIN_USER=admin bash
 ```
 
-安装完成后，终端会显示访问地址、用户名和随机密码。
-
-## 手动安装
-
-### 1. 准备配置
+命令行管理示例：
 
 ```bash
-cp .env.example .env
-cp .env.credentials.example .env.credentials
+sudo /opt/nodelite/install.sh status
+sudo /opt/nodelite/install.sh port 18060
+sudo /opt/nodelite/install.sh path panel-new-secret
+sudo /opt/nodelite/install.sh host node.example.com
+sudo /opt/nodelite/install.sh restart
 ```
 
-编辑 `.env`：
+## TCPFit 菜单项
 
-```dotenv
-PUBLIC_HOST=node.example.com
-PANEL_PORT=2060
-```
+TCPFit 来源：<https://github.com/Kylin010/tcpfit>。
 
-编辑 `.env.credentials`，设置强密码和随机签名密钥：
+NodeLite 不会默认执行它。选择菜单 8 后会先说明风险并要求确认，然后解析 TCPFit 当前 `main` 提交、下载该固定提交对应的脚本、执行 Bash 语法检查并显示 SHA256，最后进入 TCPFit 自己的菜单。
 
-```dotenv
-ADMIN_USER=admin
-ADMIN_PASSWORD=replace-with-a-strong-password
-APP_SECRET=replace-with-a-long-random-secret
-```
+TCPFit 可能修改 sysctl、qdisc、默认路由参数、systemd 服务和可选 swap。执行前请确保有云控制台/KVM 回退通道；回滚由 TCPFit 自身的 `rollback` 功能负责。
 
-可用下面的命令生成随机值：
+## Reality 伪装目标
 
-```bash
-openssl rand -base64 32
-```
+内置预设：
 
-### 2. 创建运行目录
-
-```bash
-mkdir -p data xray-config
-chmod 700 data xray-config
-chmod 600 .env.credentials
-```
-
-### 3. 启动
-
-```bash
-docker compose up -d --build
-```
-
-打开：
-
-```text
-http://服务器地址:2060/login
-```
-
-### 4. 检查状态
-
-```bash
-docker compose ps
-docker compose logs --tail=100 panel netguard xray
-```
-
-## REALITY 伪装目标
-
-当前内置预设：
-
-- Apple（默认）
+- Apple
 - Amazon
 - Cloudflare
 - Mozilla Add-ons
 - Bing
-- Google
-- 自定义域名
+- 自定义
 
-预设域名是否适合某台服务器取决于服务器出口网络、目标 TLS 行为和 Xray 版本，部署前后都应实测。当前列表已移除在生产真实 VLESS 链路测试中失败的 Microsoft 和 Oracle，并加入通过 TLS 1.3、真实代理 HTTPS 和流量计数验证的 Bing 与 Google。
+Google、Microsoft 和 Oracle 已从推荐预设移除。目标域名是否适合某台服务器取决于服务器出口网络和 TLS 行为，部署后仍应使用真实客户端测试。
 
-Cloudflare 属于 CDN 目标。Xray 官方文档提醒：使用 CDN 目标时，未通过 REALITY 验证的连接可能被转发至目标，存在被滥用的风险。公网部署时应结合前置过滤、访问控制与日志监控评估使用。
+## 手动安装
 
-## 反向代理子路径
-
-面板支持由反向代理传入：
-
-```http
-X-Forwarded-Prefix: /node-panel
+```bash
+git clone https://github.com/dabao9037/nodelite.git
+cd nodelite
+cp .env.example .env
+cp .env.credentials.example .env.credentials
+chmod 600 .env .env.credentials
+mkdir -p data xray-config
+chmod 700 data
+chmod 755 xray-config
+docker compose up -d --build
 ```
 
-Nginx 示例：
+`.env` 示例：
+
+```env
+PUBLIC_HOST=node.example.com
+PANEL_PORT=2060
+ACCESS_PATH=panel-change-me
+```
+
+## 反向代理
+
+NodeLite 自带随机路径网关。如果再放到外层 Nginx/Caddy 后面，请转发完整随机目录，不要把根路径直接映射到 Panel。例如随机目录为 `panel-change-me`：
 
 ```nginx
-location /node-panel/ {
-    proxy_pass http://127.0.0.1:2060/;
+location /panel-change-me/ {
+    proxy_pass http://127.0.0.1:2060/panel-change-me/;
     proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-Prefix /node-panel;
 }
 ```
 
-访问地址：
-
-```text
-https://node.example.com/node-panel/login
-```
-
 ## 测试
-
-本机有 Python 环境时：
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q
+PYTHONPATH=. pytest -q
 ```
 
-或直接使用容器运行测试：
+真实空目录 Compose 启动门禁：
 
 ```bash
-docker build --target test -t nodelite-test .
-docker run --rm nodelite-test
-```
-
-## 发布门禁
-
-`deploy.sh` 会执行：
-
-1. Python 编译检查
-2. 损坏标记检查
-3. 测试镜像与 pytest
-4. 无缓存构建
-5. 服务健康检查
-6. 宿主、镜像和运行容器关键文件 SHA256 对比
-
-运行：
-
-```bash
-./deploy.sh
-```
-
-## 安全说明
-
-- `.env.credentials`、数据库、Xray 运行配置和备份已在 `.gitignore` / `.dockerignore` 中排除。
-- `panel` 为重建 Xray 配置需要访问 Docker Socket。Docker Socket 等同于较高的宿主权限；只应在可信服务器部署，并限制面板暴露范围。
-- `netguard` 使用 host network、`NET_ADMIN` 和 `NET_RAW` 管理连接限制，不挂载 Docker Socket。
-- 上线前务必修改示例凭据，建议只通过 HTTPS 反向代理访问，并配合防火墙限制管理入口。
-- 不要把生产数据库、`.env.credentials`、私钥、节点分享链接或 `xray-config/` 提交到 GitHub。
-
-## 项目结构
-
-```text
-app/                 FastAPI 后端与静态页面
-netguard/            每节点连接限制守护进程
-scripts/             REALITY 验收辅助脚本
-tests/               pytest 测试
-Dockerfile           多阶段构建（测试/运行）
-docker-compose.yml   Panel、Netguard、Xray 服务
-deploy.sh             发布门禁脚本
+sudo NODELITE_FRESH_INSTALL_TEST=1 bash scripts/test-fresh-install.sh
 ```
 
 ## License

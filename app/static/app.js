@@ -139,7 +139,7 @@ function localDateTime(epoch) {
 
 const REALITY_PRESETS = new Set([
   'www.apple.com', 'www.amazon.com', 'www.cloudflare.com',
-  'addons.mozilla.org', 'www.bing.com', 'www.google.com'
+  'addons.mozilla.org', 'www.bing.com'
 ]);
 
 function updateRealityPreset() {

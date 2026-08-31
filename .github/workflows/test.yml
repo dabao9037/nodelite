@@ -31,13 +31,24 @@ jobs:
               "www.cloudflare.com",
               "addons.mozilla.org",
               "www.bing.com",
-              "www.google.com",
           ):
               assert f'value="{host}"' in page, host
               assert host in script, host
-          for removed in ("www.microsoft.com", "www.oracle.com"):
+          for removed in ("www.microsoft.com", "www.oracle.com", "www.google.com"):
               assert f'value="{removed}"' not in page, removed
               assert removed not in script, removed
+          PY
+      - name: Verify release configuration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+          installer = Path("install.sh").read_text(encoding="utf-8")
+          assert "ghcr.io/xtls/xray-core:26.6.27" in compose
+          assert "ACCESS_PATH" in compose and "simple-node-gateway" in compose
+          assert Path("gateway/server.py").is_file()
+          assert "TCPFit 网络调优" in installer
           PY
       - name: Run unit tests
         run: |

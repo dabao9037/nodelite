@@ -56,10 +56,13 @@ require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/
 save_installer() {
   local destination="$1" source="${BASH_SOURCE[0]:-}"
   mkdir -p "$(dirname "$destination")"
-  [[ "$source" == "$destination" ]] && bash -n "$destination" 2>/dev/null && return 0
   case "$source" in
     ""|bash|/bin/bash|/usr/bin/bash|/dev/fd/*|/proc/*/fd/*) source="" ;;
   esac
+  if [[ -n "$source" && -e "$destination" && "$source" -ef "$destination" ]]; then
+    bash -n "$destination" || die "保存的 NodeLite 管理脚本不完整"
+    return 0
+  fi
   if [[ -n "$source" && -f "$source" && -r "$source" ]]; then
     install -m 0755 "$source" "$destination"
   else

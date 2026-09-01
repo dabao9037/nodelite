@@ -23,38 +23,8 @@ jobs:
         run: |
           bash -n install.sh install-docker.sh scripts/*.sh
           bash scripts/test-native-smoke.sh
-      - name: Verify REALITY preset list
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          page = Path("app/static/index.html").read_text(encoding="utf-8")
-          script = Path("app/static/app.js").read_text(encoding="utf-8")
-          groups = {
-              "美国": ("www.atlasobscura.com", "www.backblaze.com"),
-              "英国": ("www.jodrellbank.net", "www.sciencemuseum.org.uk"),
-              "日本": ("www.animatetimes.com", "www.famitsu.com"),
-              "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
-              "欧洲": ("www.cern.ch", "www.gog.com"),
-              "香港": ("www.hkstp.org", "www.discoverhongkong.com"),
-          }
-          for label, hosts in groups.items():
-              assert f'<optgroup label="{label}">' in page, label
-              for host in hosts:
-                  assert f'value="{host}"' in page, host
-                  assert host in script, host
-          for removed in (
-              "www.apple.com", "www.microsoft.com", "www.bbc.co.uk", "www.gov.uk",
-              "www.sony.jp", "www.nintendo.co.jp", "www.singaporeair.com", "www.dbs.com",
-              "www.ikea.com", "www.cathaypacific.com", "www.hangseng.com",
-              "www.nature.com", "www.visitfinland.com", "www.animenewsnetwork.com",
-          ):
-              assert f'value="{removed}"' not in page, removed
-              assert removed not in script, removed
-          assert "document.execCommand('copy')" in script
-          assert "await copyText(copy.dataset.copy)" in script
-          assert "await navigator.clipboard.writeText(copy.dataset.copy)" not in script
-          PY
+      - name: Verify REALITY source preset list
+        run: python scripts/verify_native_release.py .
       - name: Verify release configuration
         run: |
           python - <<'PY'

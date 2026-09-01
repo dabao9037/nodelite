@@ -36,7 +36,7 @@ login_code=$(curl -ksS --max-time 30 -c "$ARTIFACT_DIR/cookie.txt" \
 create_code=$(curl -ksS --max-time 45 -b "$ARTIFACT_DIR/cookie.txt" \
   -o "$ARTIFACT_DIR/node.json" -w '%{http_code}' \
   -H 'Content-Type: application/json' -X POST "${BASE_URL%/}/api/nodes" \
-  --data "{\"name\":\"real-vless-gate-$(date +%s)\",\"protocol\":\"vless\",\"server_name\":\"www.apple.com\",\"destination\":\"www.apple.com:443\"}")
+  --data "{\"name\":\"real-vless-gate-$(date +%s)\",\"protocol\":\"vless\",\"server_name\":\"www.atlasobscura.com\",\"destination\":\"www.atlasobscura.com:443\"}")
 [[ "$create_code" == 201 ]]
 
 python3 - "$ARTIFACT_DIR" "$SOCKS_PORT" <<'PY'

@@ -7,6 +7,8 @@ root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
 page = (root / "app/static/index.html").read_text(encoding="utf-8")
 script = (root / "app/static/app.js").read_text(encoding="utf-8")
 installer = (root / "install.sh").read_text(encoding="utf-8")
+docker_installer = (root / "install-docker.sh").read_text(encoding="utf-8")
+stylesheet = (root / "app/static/app.css").read_text(encoding="utf-8")
 
 groups = {
     "美国": ("www.atlasobscura.com", "www.backblaze.com"),
@@ -39,4 +41,10 @@ assert "await copyText(copy.dataset.copy)" in script
 assert "await navigator.clipboard.writeText(copy.dataset.copy)" not in script
 assert '[[ -n "$host" && -n "$port" && -n "$path" && -n "$user" && -n "$password" ]]' in installer
 assert "用户名：%s\\n密码：%s" in installer
+assert 'port="${port:-$(random_high_port)}"' in installer
+assert 'port="${port:-$(random_high_port)}"' in docker_installer
+assert "DEFAULT_PORT=2060" not in installer
+assert "DEFAULT_PORT=2060" not in docker_installer
+assert "grid-template-columns: minmax(92px, auto)" in stylesheet
+assert ".node-meta .port strong { overflow: visible; text-overflow: clip; white-space: nowrap;" in stylesheet
 print("verified: 6 groups, 12 niche domains, removed legacy presets, non-empty username/password output")

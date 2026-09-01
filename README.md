@@ -22,7 +22,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/inst
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh | \
-  PUBLIC_HOST=node.example.com PANEL_PORT=2060 ADMIN_USER=admin bash
+  PUBLIC_HOST=node.example.com ADMIN_USER=admin bash
 ```
 
 可用 `NODELITE_VERSION=vX.Y.Z` 固定 Release。安装后执行 `node`；若已有 Node.js，绝不覆盖 `/usr/local/bin/node`，改用 `nodelite`。
@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh 
 访问地址类似：
 
 ```text
-http://服务器IP:2060/panel-a1b2c3d4e5f6a7b8/login
+http://服务器IP:随机高位端口/panel-a1b2c3d4e5f6a7b8/login
 ```
 
 裸 `IP:端口` 返回 404。随机目录不是身份认证替代品，请仍使用强密码并配置防火墙。

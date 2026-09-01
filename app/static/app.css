@@ -62,10 +62,10 @@ input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px #1
 .status { flex: none; display: inline-flex; border-radius: 99px; padding: 5px 8px; background: #e1e4dc; color: #5f655d; font-size: 8px; font-weight: 900; letter-spacing: .08em; }
 .status-active { color: var(--green); background: #daf1df; }
 .status-expired { color: #9c2f1a; background: #ffe1d8; }
-.node-meta { display: grid; grid-template-columns: 64px 1fr 1.35fr; gap: 12px; }
+.node-meta { display: grid; grid-template-columns: minmax(92px, auto) minmax(72px, 1fr) minmax(120px, 1.35fr); gap: 12px; }
 .node-meta > div { min-width: 0; }
 .node-meta strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
-.node-meta .port strong { font-size: 25px; }
+.node-meta .port strong { overflow: visible; text-overflow: clip; white-space: nowrap; font-size: clamp(21px, 2.2vw, 25px); font-variant-numeric: tabular-nums; }
 .node-meta small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
 .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .metrics > div { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--card); }
@@ -212,6 +212,7 @@ footer { border-top: 1px solid var(--line); padding: 25px 0 40px; color: var(--m
   .protocol { padding: 16px; }
   .form-grid { grid-template-columns: 1fr; }
   .node-card { grid-template-columns: 1fr 78px; gap: 14px; }
+  .node-meta { grid-template-columns: minmax(92px, auto) minmax(72px, 1fr) minmax(110px, 1.35fr); }
   .node-head, .node-meta, .metrics, .link { grid-column: 1 / -1; }
   .qr { grid-column: 2; grid-row: 5; width: 78px; height: 78px; }
   .actions { grid-column: 1; grid-row: 5; flex-direction: row; align-self: center; }

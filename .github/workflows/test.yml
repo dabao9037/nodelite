@@ -58,6 +58,8 @@ jobs:
           sudo bash scripts/test-installer-inplace-update.sh
           sudo bash scripts/test-installer-access-output.sh
           sudo bash scripts/test-installer-glibc-preflight.sh
+          sudo bash scripts/test-installer-random-port.sh
+          bash scripts/test-ui-port-display.sh
 
   fresh-install:
     runs-on: ubuntu-latest

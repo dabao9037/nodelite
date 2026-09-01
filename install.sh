@@ -5,7 +5,6 @@ REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
 BIN_DIR="${NODELITE_BIN_DIR:-/usr/local/bin}"
-DEFAULT_PORT=2060
 INTERNAL_PORT=18080
 PASSWORD_KEY="ADMIN_""PASSWORD"
 SECRET_KEY="APP_""SECRET"
@@ -20,6 +19,15 @@ random_password() { openssl rand -base64 24 | tr -d '\n=/+' | cut -c1-20; }
 random_secret() { openssl rand -hex 32; }
 random_path() { printf 'panel-%s' "$(openssl rand -hex 8)"; }
 valid_port() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 1 <= $1 && $1 <= 65535 )); }
+port_available() { ! ss -H -ltn 2>/dev/null | awk -v suffix=":$1" '$4 ~ suffix "$" {found=1} END {exit !found}'; }
+random_high_port() {
+  local candidate
+  for _ in $(seq 1 200); do
+    candidate=$((40000 + 0x$(openssl rand -hex 2) % 20001))
+    if port_available "$candidate"; then printf '%s' "$candidate"; return 0; fi
+  done
+  die "无法在 40000-60000 找到空闲访问端口"
+}
 normalize_path() { local v="${1#/}"; v="${v%/}"; [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || return 1; printf '%s' "$v"; }
 read_key() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n1 || true; }
 set_key() { local f="$1" k="$2" v="$3" t; t="$(mktemp)"; [[ ! -f "$f" ]] || grep -v "^${k}=" "$f" >"$t" || true; printf '%s=%s\n' "$k" "$v" >>"$t"; install -m 600 "$t" "$f"; rm -f "$t"; }
@@ -309,7 +317,7 @@ install_or_update() {
   arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
   url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/nodelite-linux-$arch.tar.gz}"
   host="${PUBLIC_HOST:-$(read_key "$old" PUBLIC_HOST)}"; [[ -n "$host" ]] || host="$(curl -4fsS --max-time 8 https://api.ipify.org || hostname -I | awk '{print $1}')"
-  port="${PANEL_PORT:-$(read_key "$old" LISTEN_PORT)}"; port="${port:-$DEFAULT_PORT}"; valid_port "$port" || die "端口必须为 1-65535"
+  port="${PANEL_PORT:-$(read_key "$old" LISTEN_PORT)}"; port="${port:-$(random_high_port)}"; valid_port "$port" || die "端口必须为 1-65535"
   path="${ACCESS_PATH:-$(read_key "$old" ACCESS_PATH)}"; path="${path:-$(random_path)}"; path="$(normalize_path "$path")" || die "随机路径格式错误"
   user="${ADMIN_USER:-$(read_key "$old" ADMIN_USER)}"; user="${user:-admin}"
   password="${!PASSWORD_KEY:-$(read_key "$old" "$PASSWORD_KEY")}"; password="${password:-$(random_password)}"

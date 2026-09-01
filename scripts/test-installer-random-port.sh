@@ -9,7 +9,7 @@ python3 - "$ROOT/install.sh" "$TMP/functions.sh" <<'PY'
 import sys
 from pathlib import Path
 source = Path(sys.argv[1]).read_text()
-names = ("validate_port", "port_available", "random_high_port")
+names = ("valid_port", "port_available", "random_high_port")
 blocks = []
 for name in names:
     start = source.index(f"{name}() {{")
@@ -36,6 +36,8 @@ for _ in {1..20}; do
   [[ "$port" != 2060 ]]
 done
 
-grep -q 'listen_port="$(env_get LISTEN_PORT)"' "$ROOT/install.sh"
-grep -q 'listen_port="$(random_high_port)"' "$ROOT/install.sh"
+grep -Fq 'port="${PANEL_PORT:-$(read_key "$old" LISTEN_PORT)}"; port="${port:-$(random_high_port)}"' "$ROOT/install.sh"
+grep -Fq 'port="${port:-$(random_high_port)}"' "$ROOT/install-docker.sh"
+! grep -q '^DEFAULT_PORT=2060$' "$ROOT/install.sh"
+! grep -q '^DEFAULT_PORT=2060$' "$ROOT/install-docker.sh"
 echo "random high-port installer policy OK"

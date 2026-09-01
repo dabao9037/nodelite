@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 REPO_URL="${NODELITE_REPO_URL:-https://github.com/dabao9037/nodelite.git}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
-DEFAULT_PORT=2060
 PASSWORD_KEY="ADMIN_""PASSWORD"
 SECRET_KEY="APP_""SECRET"
 
@@ -23,6 +22,22 @@ random_path() { printf 'panel-%s' "$(openssl rand -hex 8)"; }
 
 valid_port() {
   [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 1 <= $1 && $1 <= 65535 ))
+}
+
+port_available() {
+  ! ss -H -ltn 2>/dev/null | awk -v suffix=":$1" '$4 ~ suffix "$" {found=1} END {exit !found}'
+}
+
+random_high_port() {
+  local candidate
+  for _ in $(seq 1 200); do
+    candidate=$((40000 + 0x$(openssl rand -hex 2) % 20001))
+    if port_available "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  die "无法在 40000-60000 找到空闲访问端口"
 }
 
 normalize_path() {
@@ -52,11 +67,11 @@ install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl git openssl
+    apt-get install -y ca-certificates curl git openssl iproute2
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y ca-certificates curl git openssl
+    dnf install -y ca-certificates curl git openssl iproute
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y ca-certificates curl git openssl
+    yum install -y ca-certificates curl git openssl iproute
   else
     die "仅支持 apt、dnf 或 yum 系统"
   fi
@@ -69,7 +84,7 @@ install_docker() {
 }
 
 ensure_dependencies() {
-  command -v git >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || install_packages
+  command -v git >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 && command -v ss >/dev/null 2>&1 || install_packages
   command -v docker >/dev/null 2>&1 || install_docker
   docker compose version >/dev/null 2>&1 || die "Docker Compose 插件不可用，请先安装 Docker Compose v2"
 }
@@ -165,7 +180,7 @@ install_or_update() {
     host="$(curl -4fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
   fi
   [[ -n "$host" ]] || die "无法检测公网 IP，请使用 PUBLIC_HOST=域名或IP 重新执行"
-  port="${port:-$DEFAULT_PORT}"
+  port="${port:-$(random_high_port)}"
   valid_port "$port" || die "PANEL_PORT 必须是 1-65535 的端口"
   path="${path:-$(random_path)}"
   path="$(normalize_path "$path")" || die "ACCESS_PATH 只能包含字母、数字、下划线和横线，长度 8-64"

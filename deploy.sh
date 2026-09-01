@@ -42,6 +42,7 @@ done
 container_hash=$(docker exec simple-node-panel sha256sum /app/app/main.py | awk '{print $1}')
 test "$host_hash" = "$container_hash" || { echo "Host/container source hash mismatch" >&2; exit 69; }
 
-curl -fsS --max-time 5 http://127.0.0.1:2060/healthz | grep -q '"netguard":"running"'
+panel_port="$(sed -n 's/^PANEL_PORT=//p' .env | tail -n1)"
+curl -fsS --max-time 5 "http://127.0.0.1:${panel_port}/healthz" | grep -q '"netguard":"running"'
 docker exec simple-node-netguard python3 /netguard.py reconcile >/dev/null
 echo "DEPLOY_OK hash=$host_hash panel=$panel_health xray=$xray_health netguard=$netguard_health"

@@ -52,6 +52,27 @@ ensure_tools() {
   for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
 }
 
+ensure_git() {
+  command -v git >/dev/null 2>&1 && return 0
+  warn "TCPFit 需要 git，正在安装缺失依赖"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update && apt-get install -y ca-certificates git
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates git
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates git
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache ca-certificates git
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install ca-certificates git
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm ca-certificates git
+  else
+    die "TCPFit 需要 git，但未找到受支持的包管理器；请先安装 git 后重试"
+  fi
+  command -v git >/dev/null 2>&1 || die "git 安装失败；TCPFit 未执行，请先手动安装 git 后重试"
+}
+
 asset_arch() {
   case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) die "暂不支持架构：$(uname -m)";; esac
 }
@@ -373,7 +394,8 @@ TCPFit 是第三方系统调优工具，可能修改 sysctl、tc、systemd 与 s
 请确保有云控制台/KVM 回退。NodeLite 永不自动执行 TCPFit。
 EOF
   local answer; read -r -p "确认进入 TCPFit 菜单？[y/N]: " answer; [[ "$answer" =~ ^[Yy]$ ]] || return
-  ensure_tools; local commit tmp sha; commit="$(git ls-remote https://github.com/Kylin010/tcpfit.git refs/heads/main | awk 'NR==1{print $1}')"; [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "无法固定 TCPFit 提交"
+  ensure_tools; ensure_git
+  local commit tmp sha; commit="$(git ls-remote https://github.com/Kylin010/tcpfit.git refs/heads/main | awk 'NR==1{print $1}')"; [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "无法固定 TCPFit 提交"
   tmp="$(mktemp)"; curl -fsSL "https://raw.githubusercontent.com/Kylin010/tcpfit/$commit/tcpfit.sh" -o "$tmp"; bash -n "$tmp"; sha="$(sha256sum "$tmp" | awk '{print $1}')"; printf '提交：%s\nSHA256：%s\n' "$commit" "$sha"; bash "$tmp"; rm -f "$tmp"
 }
 

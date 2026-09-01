@@ -138,8 +138,12 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.apple.com', 'www.amazon.com', 'www.cloudflare.com',
-  'addons.mozilla.org', 'www.bing.com', 'www.google.com'
+  'www.atlasobscura.com', 'www.backblaze.com',
+  'www.jodrellbank.net', 'www.sciencemuseum.org.uk',
+  'www.animatetimes.com', 'www.famitsu.com',
+  'www.a-star.edu.sg', 'www.visitsingapore.com',
+  'www.cern.ch', 'www.gog.com',
+  'www.hkstp.org', 'www.discoverhongkong.com'
 ]);
 
 function updateShadowsocksMethod() {

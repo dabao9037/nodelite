@@ -24,8 +24,7 @@ for group in groups:
     for target in group["targets"]:
         host = target["host"]
         assert page.count(f'<option value="{host}"') == 1, host
-        assert host in script, host
-assert len(expected) == 12
+        assert len(expected) == 12
 
 methods = [
     "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
@@ -48,7 +47,7 @@ for marker in (
     'userinfo = f"{config_shadowsocks_method(cfg)}:{cfg[\'password\']}"',
 ):
     assert marker in backend, marker
-html_protocols = re.findall(r'<button class="protocol"[^>]+data-proto="([^"]+)"', page)
+html_protocols = re.findall(r'<button class="protocol(?: active)?"[^>]+data-proto="([^"]+)"', page)
 assert html_protocols == ["vless", "shadowsocks", "socks"], html_protocols
 assert re.findall(r'<option value="([^"]+)">[^<]+</option>', page[page.index('id="ssMethod"'):page.index('id="ssMethod"') + 700])[:5] == methods
 

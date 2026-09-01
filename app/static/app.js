@@ -159,12 +159,12 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.apple.com', 'www.microsoft.com',
-  'www.bbc.co.uk', 'www.gov.uk',
-  'www.sony.jp', 'www.nintendo.co.jp',
-  'www.singaporeair.com', 'www.dbs.com',
-  'www.cern.ch', 'www.ikea.com',
-  'www.cathaypacific.com', 'www.hangseng.com'
+  'www.atlasobscura.com', 'www.backblaze.com',
+  'www.jodrellbank.net', 'www.sciencemuseum.org.uk',
+  'www.animatetimes.com', 'www.famitsu.com',
+  'www.a-star.edu.sg', 'www.visitsingapore.com',
+  'www.cern.ch', 'www.gog.com',
+  'www.hkstp.org', 'www.discoverhongkong.com'
 ]);
 
 function updateRealityPreset() {

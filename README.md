@@ -95,17 +95,17 @@ bash scripts/build-native-release.sh amd64
 
 ## Reality 伪装目标
 
-内置目标按地区分组，每个地区提供两个候选：
+内置目标继续遵循“小众境外网站优先”的筛选方向，按地区分组，每个地区提供两个候选：
 
-- 美国：Apple、Microsoft
-- 英国：BBC、GOV.UK
-- 日本：Sony、Nintendo
-- 东南亚：Singapore Airlines、DBS（新加坡）
-- 欧洲：CERN（瑞士）、IKEA（瑞典）
-- 香港：Cathay Pacific、Hang Seng Bank
+- 美国：Atlas Obscura（小众旅行）、Backblaze（小众云存储企业）
+- 英国：Jodrell Bank（天文研究）、Science Museum（科学教育）
+- 日本：Animate Times（二次元资讯）、Famitsu（游戏资讯）
+- 东南亚：A*STAR（新加坡科研）、Visit Singapore（旅游）
+- 欧洲：CERN（瑞士科研）、GOG（波兰游戏平台）
+- 香港：HKSTP（香港科技园）、Discover Hong Kong（旅游）
 - 自定义
 
-以上域名在发布前均检查 DNS、443 端口、TLS 1.3 和证书主机名匹配；默认使用 Apple。Reality 目标的可用性仍会随服务器出口网络和目标站点策略变化，部署后应使用真实客户端测试。
+候选方向集中在学术研究、旅游、二次元、游戏和小众企业，避免把 Apple、Microsoft、BBC 等大型通用站点作为内置预设。发布前检查 DNS、443、TLS 1.3 和证书主机名匹配；Reality 目标的实际可用性仍受服务器出口与站点策略影响，部署后应使用真实客户端测试。
 
 ## TCPFit
 

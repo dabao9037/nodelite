@@ -36,35 +36,35 @@
           <label class="vless-field" hidden>伪装目标
             <select id="realityPreset">
               <optgroup label="美国">
-                <option value="www.apple.com">Apple · 美国（推荐）</option>
-                <option value="www.microsoft.com">Microsoft · 美国</option>
+                <option value="www.atlasobscura.com">Atlas Obscura · 小众旅行（推荐）</option>
+                <option value="www.backblaze.com">Backblaze · 小众云存储企业</option>
               </optgroup>
               <optgroup label="英国">
-                <option value="www.bbc.co.uk">BBC · 英国</option>
-                <option value="www.gov.uk">GOV.UK · 英国政府</option>
+                <option value="www.jodrellbank.net">Jodrell Bank · 天文研究</option>
+                <option value="www.sciencemuseum.org.uk">Science Museum · 科学教育</option>
               </optgroup>
               <optgroup label="日本">
-                <option value="www.sony.jp">Sony · 日本</option>
-                <option value="www.nintendo.co.jp">Nintendo · 日本</option>
+                <option value="www.animatetimes.com">Animate Times · 二次元资讯</option>
+                <option value="www.famitsu.com">Famitsu · 游戏资讯</option>
               </optgroup>
               <optgroup label="东南亚">
-                <option value="www.singaporeair.com">Singapore Airlines · 新加坡</option>
-                <option value="www.dbs.com">DBS · 新加坡</option>
+                <option value="www.a-star.edu.sg">A*STAR · 新加坡科研</option>
+                <option value="www.visitsingapore.com">Visit Singapore · 新加坡旅游</option>
               </optgroup>
               <optgroup label="欧洲">
-                <option value="www.cern.ch">CERN · 瑞士</option>
-                <option value="www.ikea.com">IKEA · 瑞典</option>
+                <option value="www.cern.ch">CERN · 瑞士科研</option>
+                <option value="www.gog.com">GOG · 波兰游戏平台</option>
               </optgroup>
               <optgroup label="香港">
-                <option value="www.cathaypacific.com">Cathay Pacific · 香港</option>
-                <option value="www.hangseng.com">Hang Seng Bank · 香港</option>
+                <option value="www.hkstp.org">HKSTP · 香港科技园</option>
+                <option value="www.discoverhongkong.com">Discover Hong Kong · 香港旅游</option>
               </optgroup>
               <option value="custom">自定义域名</option>
             </select>
             <small>按地区各提供两个已验证支持 TLS 1.3、证书匹配的目标；实际可用性仍以部署服务器实测为准。</small>
           </label>
-          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.apple.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
-          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.apple.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
+          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.atlasobscura.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
+          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.atlasobscura.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
           <label>有效期
             <select id="expirationMode">
               <option value="never">永不过期</option>

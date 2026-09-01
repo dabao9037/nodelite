@@ -17,46 +17,54 @@
     <section class="hero">
       <p class="eyebrow">MINIMAL XRAY NODE PANEL</p>
       <h1>节点管理，<em>实时可控。</em></h1>
-      <p>VLESS + Reality、Shadowsocks 和 SOCKS，带真实流量、有效期和服务端并发限制。</p>
+      <p>SOCKS、Shadowsocks 2022 和 VLESS + Reality，带真实流量、有效期和服务端并发限制。</p>
     </section>
     <section class="builder">
       <div class="protocol-picker">
-        <button class="protocol active" type="button" data-proto="vless">VLESS Reality<small>Vision + Reality</small></button>
-        <button class="protocol" type="button" data-proto="shadowsocks">Shadowsocks<small>多种现代加密方式</small></button>
-        <button class="protocol" type="button" data-proto="socks">SOCKS<small>账号密码代理</small></button>
+        <button class="protocol active" type="button" data-proto="socks">SOCKS<small>账号密码代理</small></button>
+        <button class="protocol" type="button" data-proto="shadowsocks">SS-2022<small>现代 Shadowsocks</small></button>
+        <button class="protocol" type="button" data-proto="vless">VLESS Reality<small>Vision + Reality</small></button>
       </div>
       <form id="createForm">
-        <input type="hidden" id="protocol" value="vless">
+        <input type="hidden" id="protocol" value="socks">
         <div class="form-grid">
           <label>节点名称<input id="name" required placeholder="例如：新加坡-01"></label>
           <label>端口<input id="port" type="number" min="1" max="65535" placeholder="留空自动生成"></label>
-          <label class="socks-field" hidden>用户名<input id="username" placeholder="留空自动生成"></label>
-          <label class="socks-field" hidden>密码<input id="password" placeholder="留空自动生成"></label>
-          <label class="ss-field" hidden>加密方式
-            <select id="ssMethod">
-              <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option>
-              <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
-              <option value="aes-128-gcm">aes-128-gcm</option>
-              <option value="aes-256-gcm">aes-256-gcm</option>
-              <option value="chacha20-poly1305">chacha20-poly1305</option>
-            </select>
-            <small id="ssMethodHelp">SS-2022 需要 Base64 编码、解码后恰好 16 字节的密钥。</small>
-          </label>
-          <label class="ss-field" hidden>密钥 / 密码<input id="ssPassword" placeholder="留空自动生成 16 字节 Base64 密钥"></label>
-          <label class="vless-field">伪装目标
+          <label class="socks-field">用户名<input id="username" placeholder="留空自动生成"></label>
+          <label class="socks-field">密码<input id="password" placeholder="留空自动生成"></label>
+          <label class="ss-field" hidden>SS-2022 密钥<input id="ssPassword" placeholder="留空自动生成 16 字节 Base64 密钥"></label>
+          <label class="vless-field" hidden>伪装目标
             <select id="realityPreset">
-              <option value="www.apple.com">Apple（推荐）</option>
-              <option value="www.amazon.com">Amazon</option>
-              <option value="www.cloudflare.com">Cloudflare</option>
-              <option value="addons.mozilla.org">Mozilla Add-ons</option>
-              <option value="www.bing.com">Bing</option>
-              <option value="www.google.com">Google</option>
+              <optgroup label="美国">
+                <option value="www.atlasobscura.com">Atlas Obscura · 小众旅行（推荐）</option>
+                <option value="www.backblaze.com">Backblaze · 小众云存储企业</option>
+              </optgroup>
+              <optgroup label="英国">
+                <option value="www.jodrellbank.net">Jodrell Bank · 天文研究</option>
+                <option value="www.sciencemuseum.org.uk">Science Museum · 科学教育</option>
+              </optgroup>
+              <optgroup label="日本">
+                <option value="www.animatetimes.com">Animate Times · 二次元资讯</option>
+                <option value="www.famitsu.com">Famitsu · 游戏资讯</option>
+              </optgroup>
+              <optgroup label="东南亚">
+                <option value="www.a-star.edu.sg">A*STAR · 新加坡科研</option>
+                <option value="www.visitsingapore.com">Visit Singapore · 新加坡旅游</option>
+              </optgroup>
+              <optgroup label="欧洲">
+                <option value="www.cern.ch">CERN · 瑞士科研</option>
+                <option value="www.gog.com">GOG · 波兰游戏平台</option>
+              </optgroup>
+              <optgroup label="香港">
+                <option value="www.hkstp.org">HKSTP · 香港科技园</option>
+                <option value="www.discoverhongkong.com">Discover Hong Kong · 香港旅游</option>
+              </optgroup>
               <option value="custom">自定义域名</option>
             </select>
-            <small>以上预设均已从本服务器验证 TLS 1.3 和证书匹配；目标可用性可能随网络变化。</small>
+            <small>按地区各提供两个已验证支持 TLS 1.3、证书匹配的目标；实际可用性仍以部署服务器实测为准。</small>
           </label>
-          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.apple.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
-          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.apple.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
+          <label class="vless-field reality-custom-field" hidden>SNI 域名<input id="serverName" value="www.atlasobscura.com"><small>自定义时必须填写证书与 SNI 匹配、支持 TLS 1.3 的域名。</small></label>
+          <label class="vless-field reality-custom-field" hidden>Reality 目标<input id="destination" value="www.atlasobscura.com:443"><small>自定义时使用“域名:443”，SNI 与目标域名保持一致。</small></label>
           <label>有效期
             <select id="expirationMode">
               <option value="never">永不过期</option>

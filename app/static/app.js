@@ -20,7 +20,7 @@ async function api(path, options = {}) {
 }
 
 function protocolLabel(protocol) {
-  return protocol === 'socks' ? 'SOCKS' : protocol === 'shadowsocks' ? 'SHADOWSOCKS' : 'VLESS REALITY';
+  return protocol === 'socks' ? 'SOCKS' : protocol === 'shadowsocks' ? 'SS-2022' : 'VLESS REALITY';
 }
 
 function bytes(value, rate = false) {
@@ -101,6 +101,27 @@ async function refreshTelemetry() {
   });
 }
 
+
+async function copyText(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  input.style.top = '0';
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw Error('复制失败，请手动复制链接');
+}
+
 function showError(error) {
   $('#error').textContent = error.message || String(error);
   $('#error').hidden = false;
@@ -138,24 +159,13 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.apple.com', 'www.amazon.com', 'www.cloudflare.com',
-  'addons.mozilla.org', 'www.bing.com', 'www.google.com'
+  'www.atlasobscura.com', 'www.backblaze.com',
+  'www.jodrellbank.net', 'www.sciencemuseum.org.uk',
+  'www.animatetimes.com', 'www.famitsu.com',
+  'www.a-star.edu.sg', 'www.visitsingapore.com',
+  'www.cern.ch', 'www.gog.com',
+  'www.hkstp.org', 'www.discoverhongkong.com'
 ]);
-
-function updateShadowsocksMethod() {
-  const method = $('#ssMethod').value;
-  const keyBytes = {
-    '2022-blake3-aes-128-gcm': 16,
-    '2022-blake3-aes-256-gcm': 32
-  }[method];
-  if (keyBytes) {
-    $('#ssMethodHelp').textContent = `SS-2022 需要 Base64 编码、解码后恰好 ${keyBytes} 字节的密钥。`;
-    $('#ssPassword').placeholder = `留空自动生成 ${keyBytes} 字节 Base64 密钥`;
-  } else {
-    $('#ssMethodHelp').textContent = '传统 AEAD 可使用普通密码；留空时自动生成随机强密码。';
-    $('#ssPassword').placeholder = '留空自动生成随机强密码';
-  }
-}
 
 function updateRealityPreset() {
   const value = $('#realityPreset').value;
@@ -184,7 +194,6 @@ document.querySelectorAll('.protocol').forEach(button => {
   });
 });
 
-$('#ssMethod').addEventListener('change', updateShadowsocksMethod);
 $('#realityPreset').addEventListener('change', updateRealityPreset);
 $('#serverName').addEventListener('input', () => {
   if ($('#realityPreset').value === 'custom' && !$('#destination').dataset.touched) {
@@ -195,8 +204,6 @@ $('#destination').addEventListener('input', () => { $('#destination').dataset.to
 
 bindExpiration('#expirationMode', '#expirationDateField', '#expirationDaysField');
 bindExpiration('#editExpirationMode', '#editExpirationDateField', '#editExpirationDaysField');
-updateShadowsocksMethod();
-updateRealityPreset();
 
 $('#createForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -213,7 +220,6 @@ $('#createForm').addEventListener('submit', async event => {
       body.username = $('#username').value || null;
       body.password = $('#password').value || null;
     } else if (protocol === 'shadowsocks') {
-      body.method = $('#ssMethod').value;
       body.password = $('#ssPassword').value || null;
     } else {
       body.server_name = $('#serverName').value;
@@ -221,11 +227,8 @@ $('#createForm').addEventListener('submit', async event => {
     }
     await api('api/nodes', {method: 'POST', body: JSON.stringify(body)});
     event.target.reset();
-    delete $('#destination').dataset.touched;
     $('#protocol').value = protocol;
     $('#expirationMode').dispatchEvent(new Event('change'));
-    updateShadowsocksMethod();
-    updateRealityPreset();
     await load();
   } catch (error) { showError(error); }
 });
@@ -237,7 +240,7 @@ $('#list').addEventListener('click', async event => {
   const remove = event.target.closest('[data-delete]');
   try {
     if (copy) {
-      await navigator.clipboard.writeText(copy.dataset.copy);
+      await copyText(copy.dataset.copy);
       copy.textContent = '已复制';
       setTimeout(() => copy.textContent = '复制', 1000);
     } else if (edit) {

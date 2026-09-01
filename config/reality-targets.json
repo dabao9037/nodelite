@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "groups": [
+    {"label": "美国 · 文化探索 / 小众云企业", "targets": [{"name": "Atlas Obscura", "host": "www.atlasobscura.com"}, {"name": "Backblaze", "host": "www.backblaze.com"}]},
+    {"label": "英国 · 科研设施 / 科学博物馆", "targets": [{"name": "Jodrell Bank", "host": "www.jodrellbank.net"}, {"name": "Science Museum", "host": "www.sciencemuseum.org.uk"}]},
+    {"label": "日本 · 二次元 / 游戏媒体", "targets": [{"name": "Animate Times", "host": "www.animatetimes.com"}, {"name": "Famitsu", "host": "www.famitsu.com"}]},
+    {"label": "东南亚 · 科研机构 / 旅游资讯", "targets": [{"name": "A*STAR", "host": "www.a-star.edu.sg"}, {"name": "Visit Singapore", "host": "www.visitsingapore.com"}]},
+    {"label": "欧洲 · 科研 / 游戏平台", "targets": [{"name": "CERN", "host": "www.cern.ch"}, {"name": "GOG", "host": "www.gog.com"}]},
+    {"label": "香港 · 科创园区 / 旅游资讯", "targets": [{"name": "HKSTP", "host": "www.hkstp.org"}, {"name": "Discover Hong Kong", "host": "www.discoverhongkong.com"}]}
+  ]
+}

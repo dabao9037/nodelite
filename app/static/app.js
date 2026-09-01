@@ -101,6 +101,26 @@ async function refreshTelemetry() {
   });
 }
 
+async function copyText(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', '');
+  input.style.position = 'fixed';
+  input.style.left = '-9999px';
+  input.style.top = '0';
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw Error('复制失败，请手动复制链接');
+}
+
 function showError(error) {
   $('#error').textContent = error.message || String(error);
   $('#error').hidden = false;
@@ -241,7 +261,7 @@ $('#list').addEventListener('click', async event => {
   const remove = event.target.closest('[data-delete]');
   try {
     if (copy) {
-      await navigator.clipboard.writeText(copy.dataset.copy);
+      await copyText(copy.dataset.copy);
       copy.textContent = '已复制';
       setTimeout(() => copy.textContent = '复制', 1000);
     } else if (edit) {

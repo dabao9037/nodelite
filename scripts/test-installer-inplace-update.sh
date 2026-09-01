@@ -17,11 +17,15 @@ cp /src/install.sh /fixture-v021/install.sh
 cp /src/install.sh /fixture-v022/install.sh
 printf 'v021\n' >/fixture-v021/code-marker
 printf 'v022\n' >/fixture-v022/code-marker
-mkdir -p /fixture-v021/bin /fixture-v021/systemd /fixture-v021/config /fixture-v021/data /fixture-v021/xray-config
-mkdir -p /fixture-v022/bin /fixture-v022/systemd /fixture-v022/config /fixture-v022/data /fixture-v022/xray-config
-printf '#!/bin/sh\n' >/fixture-v021/bin/nodelite-panel
-printf '#!/bin/sh\n' >/fixture-v022/bin/nodelite-panel
-chmod 0755 /fixture-v021/bin/nodelite-panel /fixture-v022/bin/nodelite-panel
+for fixture in /fixture-v021 /fixture-v022; do
+  mkdir -p "$fixture/bin" "$fixture/systemd" "$fixture/config" "$fixture/data" "$fixture/xray-config"
+  printf 'amd64\n' >"$fixture/ARCH"
+  printf '2.31\n' >"$fixture/GLIBC_MAX"
+  for binary in nodelite-panel nodelite-gateway nodelite-netguard xray; do
+    printf '#!/bin/sh\nexit 0\n' >"$fixture/bin/$binary"
+    chmod 0755 "$fixture/bin/$binary"
+  done
+done
 for unit in netguard xray panel gateway; do
   printf '[Unit]\nDescription=NodeLite test service\n' >"/fixture-v021/systemd/nodelite-$unit.service"
   printf '[Unit]\nDescription=NodeLite test service\n' >"/fixture-v022/systemd/nodelite-$unit.service"

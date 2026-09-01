@@ -72,6 +72,30 @@ save_installer() {
   bash -n "$destination" || die "保存的 NodeLite 管理脚本不完整"
 }
 
+backup_runtime_state() {
+  local backup_dir="$1" item
+  mkdir -p "$backup_dir"
+  for item in config data xray-config; do
+    if [[ -e "$INSTALL_DIR/$item" || -L "$INSTALL_DIR/$item" ]]; then
+      cp -a -- "$INSTALL_DIR/$item" "$backup_dir/$item"
+    fi
+  done
+}
+
+install_release_code() {
+  local release_dir="$1" item name
+  mkdir -p "$INSTALL_DIR"
+  for item in "$release_dir"/* "$release_dir"/.[!.]*; do
+    [[ -e "$item" || -L "$item" ]] || continue
+    name="${item##*/}"
+    case "$name" in
+      config|data|xray-config) continue ;;
+    esac
+    rm -rf -- "$INSTALL_DIR/$name"
+    cp -a -- "$item" "$INSTALL_DIR/"
+  done
+}
+
 stop_legacy_docker() {
   command -v docker >/dev/null 2>&1 || return 0
   local name running=()
@@ -265,7 +289,7 @@ show_access() {
 
 install_or_update() {
   ensure_tools
-  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret old_internal had_existing=0
+  local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret old_internal had_existing=0 release_dir backup_dir
   [[ -f "$old" ]] && had_existing=1
   arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
   url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/nodelite-linux-$arch.tar.gz}"
@@ -278,13 +302,15 @@ install_or_update() {
   old_internal="$(read_key "$old" PANEL_INTERNAL_PORT)"
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
   info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
-  tar -tzf "$tmp/release.tar.gz" >/dev/null
+  release_dir="$tmp/release"; backup_dir="$tmp/runtime-state"
+  mkdir -p "$release_dir"
+  tar -xzf "$tmp/release.tar.gz" -C "$release_dir"
+  backup_runtime_state "$backup_dir"
   stop_legacy_docker
   stop_native_for_upgrade
   preflight_port "$port"
   choose_internal_port "$old_internal"
-  mkdir -p "$INSTALL_DIR"; tar -xzf "$tmp/release.tar.gz" -C "$INSTALL_DIR"
-  save_installer "$INSTALL_DIR/install.sh"
+  install_release_code "$release_dir"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'

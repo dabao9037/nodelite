@@ -55,6 +55,7 @@ jobs:
           sudo bash scripts/test-installer-fail-fast.sh
           sudo bash scripts/test-installer-process-substitution.sh
           sudo bash scripts/test-installer-save-same-file.sh
+          sudo bash scripts/test-installer-inplace-update.sh
           sudo bash scripts/test-installer-access-output.sh
 
   fresh-install:

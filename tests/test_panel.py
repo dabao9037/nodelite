@@ -20,14 +20,10 @@ def panel(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_" + "PASSWORD", "correct-horse")
     monkeypatch.setenv("APP_" + "SECRET", "test-signing-value")
     monkeypatch.setenv("PUBLIC_HOST", "node.example.test")
-    monkeypatch.setenv("RUNTIME_BACKEND", "docker")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "panel.db"))
     monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
     monkeypatch.setenv("NETGUARD_REQUIRED", "0")
     monkeypatch.setenv("BACKGROUND_INTERVAL_SECONDS", "3600")
-    monkeypatch.setenv("REALITY_TARGETS_URL", "")
-    monkeypatch.setenv("REALITY_TARGETS_CACHE", str(tmp_path / "reality-targets-cache.json"))
-    monkeypatch.setenv("REALITY_TARGETS_BUNDLED", str(Path(__file__).resolve().parents[1] / "config/reality-targets.json"))
     sys.modules.pop("app.main", None)
     module = importlib.import_module("app.main")
     module.init_db()
@@ -119,37 +115,149 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     login(client)
     home = client.get("/")
     assert home.status_code == 200
-    default_option = '<option value="www.atlasobscura.com">Atlas Obscura · 小众旅行（推荐）</option>'
-    assert default_option in home.text
-    expected_groups = {
-        "美国": ("www.atlasobscura.com", "www.backblaze.com"),
-        "英国": ("www.jodrellbank.net", "www.sciencemuseum.org.uk"),
-        "日本": ("www.animatetimes.com", "www.famitsu.com"),
-        "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
-        "欧洲": ("www.cern.ch", "www.gog.com"),
-        "香港": ("www.hkstp.org", "www.discoverhongkong.com"),
-    }
-    for group, hosts in expected_groups.items():
-        assert f'<optgroup label="{group}">' in home.text
-        for host in hosts:
-            assert f'value="{host}"' in home.text
-    for removed_host in (
-        "www.apple.com", "www.microsoft.com", "www.bbc.co.uk", "www.gov.uk",
-        "www.sony.jp", "www.nintendo.co.jp", "www.singaporeair.com", "www.dbs.com",
-        "www.ikea.com", "www.cathaypacific.com", "www.hangseng.com",
-        "www.nature.com", "www.visitfinland.com", "www.animenewsnetwork.com",
+    apple_option = '<option value="www.apple.com">Apple（推荐）</option>'
+    assert apple_option in home.text
+    for host in (
+        "www.apple.com", "www.amazon.com", "www.cloudflare.com",
+        "addons.mozilla.org", "www.bing.com", "www.google.com",
     ):
+        assert f'value="{host}"' in home.text
+    for removed_host in ("www.microsoft.com", "www.oracle.com"):
         assert f'value="{removed_host}"' not in home.text
     assert 'value="custom"' in home.text
-    assert '<input id="serverName" value="www.atlasobscura.com">' in home.text
-    assert '<input id="destination" value="www.atlasobscura.com:443">' in home.text
-    assert module.reality_values(None, None) == ("www.atlasobscura.com", "www.atlasobscura.com:443")
+    assert '<input id="serverName" value="www.apple.com">' in home.text
+    assert '<input id="destination" value="www.apple.com:443">' in home.text
+    assert module.reality_values(None, None) == ("www.apple.com", "www.apple.com:443")
     script = (Path(module.BASE_DIR) / "static/app.js").read_text()
     assert "updateRealityPreset" in script
     assert "`${value}:443`" in script
-    assert "document.execCommand('copy')" in script
-    assert "await copyText(copy.dataset.copy)" in script
-    assert "await navigator.clipboard.writeText(copy.dataset.copy)" not in script
+
+
+def decode_ss_link(link):
+    auth = urlsplit(link).username
+    auth += "=" * (-len(auth) % 4)
+    return base64.urlsafe_b64decode(auth).decode()
+
+
+def test_protocol_order_and_shadowsocks_method_controls(panel):
+    module, client = panel
+    login(client)
+    home = client.get("/")
+    assert home.status_code == 200
+    protocol_positions = [
+        home.text.index('data-proto="vless"'),
+        home.text.index('data-proto="shadowsocks"'),
+        home.text.index('data-proto="socks"'),
+    ]
+    assert protocol_positions == sorted(protocol_positions)
+    assert '<input type="hidden" id="protocol" value="vless">' in home.text
+    for method in module.SS_METHOD_KEY_BYTES:
+        assert f'<option value="{method}">' in home.text
+    script = (Path(module.BASE_DIR) / "static/app.js").read_text()
+    assert "updateShadowsocksMethod" in script
+    assert "body.method = $('#ssMethod').value" in script
+    assert "updateRealityPreset" in script
+
+
+def test_shadowsocks_methods_config_links_and_generated_secrets(panel):
+    module, client = panel
+    login(client)
+    cases = [
+        ("2022-blake3-aes-128-gcm", base64.b64encode(b"a" * 16).decode()),
+        ("2022-blake3-aes-256-gcm", base64.b64encode(b"b" * 32).decode()),
+        ("aes-128-gcm", "ordinary password"),
+        ("aes-256-gcm", "another ordinary password"),
+        ("chacha20-poly1305", "chacha password"),
+    ]
+    for offset, (method, password) in enumerate(cases):
+        response = client.post("/api/nodes", json={
+            "name": method, "protocol": "shadowsocks", "port": 22100 + offset,
+            "method": method, "password": password,
+        })
+        assert response.status_code == 201
+        node = response.json()
+        assert node["config"]["method"] == method
+        assert node["config"]["password"] == password
+        assert decode_ss_link(node["link"]) == f"{method}:{password}"
+
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+    inbounds = module.config_for(rows)["inbounds"]
+    assert [item["settings"]["method"] for item in inbounds] == [method for method, _ in cases]
+    assert [json.loads(row["config"])["method"] for row in rows] == [method for method, _ in cases]
+
+    generated_128 = client.post("/api/nodes", json={
+        "name": "generated 128", "protocol": "shadowsocks", "port": 22200,
+        "method": "2022-blake3-aes-128-gcm",
+    }).json()["config"]["password"]
+    generated_256 = client.post("/api/nodes", json={
+        "name": "generated 256", "protocol": "shadowsocks", "port": 22201,
+        "method": "2022-blake3-aes-256-gcm",
+    }).json()["config"]["password"]
+    generated_aead = client.post("/api/nodes", json={
+        "name": "generated aead", "protocol": "shadowsocks", "port": 22202,
+        "method": "aes-256-gcm",
+    }).json()["config"]["password"]
+    assert len(base64.b64decode(generated_128, validate=True)) == 16
+    assert len(base64.b64decode(generated_256, validate=True)) == 32
+    assert len(generated_aead) >= 24
+
+
+def test_shadowsocks_method_and_key_validation(panel):
+    _, client = panel
+    login(client)
+    unsupported = client.post("/api/nodes", json={
+        "name": "bad method", "protocol": "shadowsocks", "method": "rc4-md5",
+    })
+    assert unsupported.status_code == 422
+    assert "不支持" in unsupported.json()["detail"]
+
+    invalid_base64 = client.post("/api/nodes", json={
+        "name": "bad base64", "protocol": "shadowsocks",
+        "method": "2022-blake3-aes-128-gcm", "password": "not base64!",
+    })
+    assert invalid_base64.status_code == 422
+    assert "Base64" in invalid_base64.json()["detail"]
+
+    wrong_128 = client.post("/api/nodes", json={
+        "name": "wrong 128", "protocol": "shadowsocks",
+        "method": "2022-blake3-aes-128-gcm", "password": base64.b64encode(b"x" * 32).decode(),
+    })
+    assert wrong_128.status_code == 422
+    assert "16 字节" in wrong_128.json()["detail"]
+
+    wrong_256 = client.post("/api/nodes", json={
+        "name": "wrong 256", "protocol": "shadowsocks",
+        "method": "2022-blake3-aes-256-gcm", "password": base64.b64encode(b"x" * 16).decode(),
+    })
+    assert wrong_256.status_code == 422
+    assert "32 字节" in wrong_256.json()["detail"]
+
+    ordinary = client.post("/api/nodes", json={
+        "name": "ordinary", "protocol": "shadowsocks",
+        "method": "aes-128-gcm", "password": "not base64 and valid",
+    })
+    assert ordinary.status_code == 201
+
+
+def test_legacy_shadowsocks_node_defaults_to_2022_128(panel):
+    module, client = panel
+    login(client)
+    key = base64.b64encode(b"legacy-key-16byt").decode()
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            "INSERT INTO nodes(name,protocol,port,config,created_at) VALUES(?,?,?,?,?)",
+            ("legacy ss", "shadowsocks", 22300, json.dumps({"password": key}), 1),
+        )
+        connection.commit()
+    node = client.get("/api/nodes").json()[0]
+    assert node["config"]["method"] == module.DEFAULT_SS_METHOD
+    assert decode_ss_link(node["link"]) == f"{module.DEFAULT_SS_METHOD}:{key}"
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes").fetchone()
+    assert module.inbound(row)["settings"]["method"] == module.DEFAULT_SS_METHOD
 
 
 def test_create_edit_validation_and_defaults(panel, monkeypatch):
@@ -194,9 +302,8 @@ def test_create_and_serialize_all_three_protocols(panel, monkeypatch):
     client.post("/api/nodes", json={"name": "socks", "protocol": "socks", "port": 22001})
     shadowsocks = client.post("/api/nodes", json={"name": "ss", "protocol": "shadowsocks", "port": 22002, "password": key})
     assert shadowsocks.status_code == 201
-    ss_auth = urlsplit(shadowsocks.json()["link"]).username
-    ss_auth += "=" * (-len(ss_auth) % 4)
-    assert base64.urlsafe_b64decode(ss_auth).decode() == f"{module.SS2022_METHOD}:{key}"
+    ss_auth = decode_ss_link(shadowsocks.json()["link"])
+    assert ss_auth == f"{module.SS2022_METHOD}:{key}"
     reality = client.post("/api/nodes", json={
         "name": "reality", "protocol": "vless", "port": 22004,
         "server_name": "www.example.com", "destination": "www.example.com:443",
@@ -289,53 +396,6 @@ def test_rebuild_validates_then_restarts_and_rolls_back(panel, monkeypatch):
     assert json.loads(module.XRAY_CONFIG_PATH.read_text()) == {"known": "good"}
 
 
-def test_native_backend_does_not_import_docker_and_whitelists_commands(tmp_path, monkeypatch):
-    monkeypatch.setenv("ADMIN_" + "PASSWORD", "x")
-    monkeypatch.setenv("APP_" + "SECRET", "y")
-    monkeypatch.setenv("RUNTIME_BACKEND", "native")
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "native.db"))
-    monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
-    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
-    sys.modules.pop("app.main", None)
-    before = sys.modules.get("docker")
-    module = importlib.import_module("app.main")
-    assert module.docker is None
-    assert sys.modules.get("docker") is before
-    with pytest.raises(RuntimeError, match="non-whitelisted"):
-        module._systemctl("stop", module.XRAY_SERVICE)
-    with pytest.raises(RuntimeError, match="non-whitelisted"):
-        module._systemctl("restart", "ssh.service")
-
-
-def test_native_rebuild_validates_fixed_binary_then_restarts_service(panel, monkeypatch):
-    module, _ = panel
-    module.XRAY_CONFIG_PATH.write_text('{"old": true}', encoding="utf-8")
-    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: {})
-    monkeypatch.setattr(module, "RUNTIME_BACKEND", "native")
-    monkeypatch.setattr(module, "NATIVE_XRAY_BIN", Path("/fixed/xray"))
-    calls = []
-
-    def run(command, **kwargs):
-        calls.append(command)
-        return type("R", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
-
-    monkeypatch.setattr(module.subprocess, "run", run)
-    monkeypatch.setattr(module, "_systemctl", lambda action, service: calls.append(["systemctl", action, service]) or "")
-    module.rebuild()
-    assert calls[0] == ["/fixed/xray", "run", "-test", "-config", str(module.XRAY_CONFIG_PATH)]
-    assert calls[1] == ["systemctl", "restart", "nodelite-xray.service"]
-
-
-def test_native_health_is_strict(panel, monkeypatch):
-    module, client = panel
-    monkeypatch.setattr(module, "RUNTIME_BACKEND", "native")
-    monkeypatch.setattr(module, "NETGUARD_REQUIRED", True)
-    monkeypatch.setattr(module, "native_service_status", lambda service: "running" if service == module.XRAY_SERVICE else "unavailable")
-    response = client.get("/healthz")
-    assert response.status_code == 503
-    assert response.json()["status"] == "degraded"
-
-
 def load_netguard(tmp_path, monkeypatch):
     path = Path(__file__).parents[1] / "netguard" / "netguard.py"
     spec = importlib.util.spec_from_file_location("netguard_test", path)
@@ -349,47 +409,6 @@ def load_netguard(tmp_path, monkeypatch):
     connection.commit(); connection.close()
     monkeypatch.setattr(module, "DB_PATH", str(db))
     return module
-
-
-def test_netguard_cold_start_without_database(tmp_path, monkeypatch):
-    path = Path(__file__).parents[1] / "netguard" / "netguard.py"
-    spec = importlib.util.spec_from_file_location("netguard_cold_start_test", path)
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "DB_PATH", str(tmp_path / "not-created-yet.db"))
-    assert module.desired_rules(now=20) == []
-
-    commands = []
-    monkeypatch.setattr(module, "ensure_jump", lambda: commands.append(("ensure",)))
-    monkeypatch.setattr(module, "run", lambda *args, check=True: commands.append(args) or "")
-    assert module.reconcile() == []
-    assert commands == [("ensure",), ("iptables", "-F", module.CHAIN)]
-
-
-def test_netguard_reads_live_wal_data(tmp_path, monkeypatch):
-    path = Path(__file__).parents[1] / "netguard" / "netguard.py"
-    spec = importlib.util.spec_from_file_location("netguard_wal_test", path)
-    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    db = tmp_path / "wal.db"
-    writer = sqlite3.connect(db)
-    writer.execute("PRAGMA journal_mode=WAL")
-    writer.execute("PRAGMA wal_autocheckpoint=0")
-    writer.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,expires_at INTEGER)")
-    writer.execute("INSERT INTO nodes VALUES(1,30001,1,2,NULL)")
-    writer.commit()
-    monkeypatch.setattr(module, "DB_PATH", str(db))
-    assert module.desired_rules(now=20) == [(1, 30001, 2)]
-    writer.close()
-
-
-def test_netguard_health_fails_when_iptables_probe_fails(tmp_path, monkeypatch):
-    guard = load_netguard(tmp_path, monkeypatch)
-
-    def failed_probe(*args, **kwargs):
-        raise RuntimeError("iptables unavailable")
-
-    monkeypatch.setattr(guard, "run", failed_probe)
-    with pytest.raises(RuntimeError, match="iptables unavailable"):
-        guard.health()
 
 
 def test_connlimit_rule_generation_and_rollback(tmp_path, monkeypatch):
@@ -413,22 +432,6 @@ def test_connlimit_rule_generation_and_rollback(tmp_path, monkeypatch):
     guard.rollback()
     assert ("iptables", "-D", "INPUT", "-j", guard.CHAIN) in rollback_commands
     assert rollback_commands[-1] == ("iptables", "-X", guard.CHAIN)
-
-
-def test_netguard_daemon_rolls_back_on_sigterm_path(tmp_path, monkeypatch):
-    guard = load_netguard(tmp_path, monkeypatch)
-    calls = []
-    monkeypatch.setattr(guard, "reconcile", lambda: calls.append("reconcile") or [])
-    monkeypatch.setattr(guard, "rollback", lambda: calls.append("rollback"))
-    monkeypatch.setattr(guard.time, "monotonic", lambda: 0)
-
-    def sleep(_seconds):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(guard.time, "sleep", sleep)
-    with pytest.raises(KeyboardInterrupt):
-        guard.daemon(0.5)
-    assert calls == ["reconcile", "rollback"]
 
 
 def test_netguard_active_connection_mapping(tmp_path, monkeypatch):

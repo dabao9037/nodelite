@@ -4,12 +4,14 @@ import base64
 import binascii
 import hashlib
 import hmac
+import importlib
 import json
 import os
 import re
 import secrets
 import socket
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -20,19 +22,26 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlencode
 
-import docker
 import qrcode
-from docker.errors import DockerException, NotFound
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("DB_PATH", "/data/panel.db"))
-XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", "/xray-config/config.json"))
+RUNTIME_BACKEND = os.getenv("RUNTIME_BACKEND", "native").strip().lower()
+if RUNTIME_BACKEND not in {"native", "docker"}:
+    raise RuntimeError("RUNTIME_BACKEND must be native or docker")
+NODELITE_HOME = Path(os.getenv("NODELITE_HOME", "/opt/nodelite"))
+DB_PATH = Path(os.getenv("DB_PATH", str(NODELITE_HOME / "data/panel.db") if RUNTIME_BACKEND == "native" else "/data/panel.db"))
+XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", str(NODELITE_HOME / "xray-config/config.json") if RUNTIME_BACKEND == "native" else "/xray-config/config.json"))
 XRAY_CONTAINER = os.getenv("XRAY_CONTAINER", "simple-node-xray")
 NETGUARD_CONTAINER = os.getenv("NETGUARD_CONTAINER", "simple-node-netguard")
+XRAY_SERVICE = "nodelite-xray.service"
+NETGUARD_SERVICE = "nodelite-netguard.service"
+NATIVE_XRAY_BIN = NODELITE_HOME / "bin/xray"
+NATIVE_NETGUARD_BIN = NODELITE_HOME / "bin/nodelite-netguard"
+NATIVE_NETGUARD_SOCKET = Path(os.getenv("NETGUARD_SOCKET", "/run/nodelite/netguard.sock"))
 NETGUARD_REQUIRED = os.getenv("NETGUARD_REQUIRED", "1") != "0"
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_CREDENTIAL = os.getenv("ADMIN_" + "PASSWORD", "")
@@ -40,16 +49,17 @@ SIGNING_SECRET = os.getenv("APP_" + "SECRET", "")
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
 BACKGROUND_INTERVAL = max(1.0, float(os.getenv("BACKGROUND_INTERVAL_SECONDS", "2")))
 
-DEFAULT_SS_METHOD = "2022-blake3-aes-128-gcm"
-# Kept as an alias for callers that used the original single-method constant.
-SS2022_METHOD = DEFAULT_SS_METHOD
-SS_METHOD_KEY_BYTES = {
-    "2022-blake3-aes-128-gcm": 16,
-    "2022-blake3-aes-256-gcm": 32,
-    "aes-128-gcm": None,
-    "aes-256-gcm": None,
-    "chacha20-poly1305": None,
-}
+if RUNTIME_BACKEND == "native":
+    # The native process neither imports nor connects to Docker.
+    docker = None
+    DockerException = NotFound = ()
+else:
+    docker = importlib.import_module("docker")
+    DockerException = docker.errors.DockerException
+    NotFound = docker.errors.NotFound
+
+SS2022_METHOD = "2022-blake3-aes-128-gcm"
+SS2022_KEY_BYTES = 16
 REALITY_NETWORK = "raw"
 REALITY_FLOW = "xtls-rprx-vision"
 REALITY_FINGERPRINT = "chrome"
@@ -83,7 +93,6 @@ class NodeInput(ExpirationFields):
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
     password: str | None = None
-    method: str | None = None
     destination: str | None = None
     server_name: str | None = None
     max_connections: int | None = Field(default=None, ge=1, le=100000)
@@ -163,20 +172,68 @@ def require_admin(request: Request):
     raise HTTPException(401, "请先登录")
 
 
+def _run_native(command: list[str], *, failure_status: int = 500) -> str:
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(failure_status, f"本地服务命令失败：{exc}") from exc
+    text = (result.stdout or result.stderr).strip()
+    if result.returncode:
+        raise HTTPException(failure_status, text or "本地服务命令失败")
+    return text
+
+
+def _systemctl(action: str, service: str, *, failure_status: int = 500) -> str:
+    if action not in {"is-active", "restart"} or service not in {XRAY_SERVICE, NETGUARD_SERVICE}:
+        raise RuntimeError("refusing non-whitelisted systemctl operation")
+    return _run_native(["systemctl", action, service], failure_status=failure_status)
+
+
+def _native_netguard_health() -> bool:
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2)
+        try:
+            client.connect(str(NATIVE_NETGUARD_SOCKET))
+            payload = client.recv(4096)
+        finally:
+            client.close()
+        return json.loads(payload.decode()).get("status") == "ok"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def native_service_status(service: str) -> str:
+    try:
+        value = _systemctl("is-active", service, failure_status=503)
+        running = value == "active"
+        if running and service == NETGUARD_SERVICE:
+            running = _native_netguard_health()
+        return "running" if running else (value if value != "active" else "unhealthy")
+    except HTTPException:
+        return "unavailable"
+
+
 def docker_client():
+    if RUNTIME_BACKEND != "docker":
+        raise RuntimeError("Docker API is disabled by the native runtime backend")
     try:
         return docker.DockerClient(base_url="unix://var/run/docker.sock")
-    except DockerException as exc:
-        raise HTTPException(500, f"Docker 连接失败：{exc}") from exc
+    except Exception as exc:
+        if DockerException and isinstance(exc, DockerException):
+            raise HTTPException(500, f"Docker 连接失败：{exc}") from exc
+        raise
 
 
 def named_container(name: str):
     try:
         return docker_client().containers.get(name)
-    except NotFound:
-        return None
-    except DockerException as exc:
-        raise HTTPException(500, f"读取容器失败：{exc}") from exc
+    except Exception as exc:
+        if NotFound and isinstance(exc, NotFound):
+            return None
+        if DockerException and isinstance(exc, DockerException):
+            raise HTTPException(500, f"读取容器失败：{exc}") from exc
+        raise
 
 
 def xray_container():
@@ -184,6 +241,8 @@ def xray_container():
 
 
 def xray_exec(*args):
+    if RUNTIME_BACKEND == "native":
+        return _run_native([str(NATIVE_XRAY_BIN), *args], failure_status=503)
     container = xray_container()
     if not container:
         raise HTTPException(503, "Xray 尚未启动")
@@ -197,6 +256,8 @@ def xray_exec(*args):
 def netguard_exec(*args):
     if not NETGUARD_REQUIRED:
         return "{}"
+    if RUNTIME_BACKEND == "native":
+        return _run_native([str(NATIVE_NETGUARD_BIN), *args], failure_status=503)
     container = named_container(NETGUARD_CONTAINER)
     if not container:
         raise HTTPException(503, "连接限制执行器尚未启动")
@@ -257,44 +318,21 @@ def x25519():
     return private_key, public_key
 
 
-def shadowsocks_method(value: str | None):
-    method = (value or DEFAULT_SS_METHOD).strip()
-    if method not in SS_METHOD_KEY_BYTES:
-        raise HTTPException(422, "不支持的 Shadowsocks 加密方式")
-    return method
-
-
-def shadowsocks_password(method: str, value: str | None = None):
-    key_bytes = SS_METHOD_KEY_BYTES[method]
-    if key_bytes is None:
-        # Traditional AEAD methods derive their key from an ordinary password.
-        return value if value else secrets.token_urlsafe(24)
+def ss2022_key(value: str | None = None):
     if not value:
-        return base64.b64encode(secrets.token_bytes(key_bytes)).decode()
+        return base64.b64encode(secrets.token_bytes(SS2022_KEY_BYTES)).decode()
     candidate = value.strip()
     try:
         decoded = base64.b64decode(candidate, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(
-            422, f"{method} 密钥必须是 Base64 编码的 {key_bytes} 字节密钥"
-        ) from exc
-    if len(decoded) != key_bytes:
-        raise HTTPException(422, f"{method} 密钥解码后必须正好为 {key_bytes} 字节")
+        raise HTTPException(422, "SS-2022 密钥必须是 Base64 编码的 16 字节密钥") from exc
+    if len(decoded) != SS2022_KEY_BYTES:
+        raise HTTPException(422, "SS-2022 密钥解码后必须正好为 16 字节")
     return base64.b64encode(decoded).decode()
 
 
-def ss2022_key(value: str | None = None):
-    """Backward-compatible validator for the original SS-2022 128-bit method."""
-    return shadowsocks_password(DEFAULT_SS_METHOD, value)
-
-
-def config_shadowsocks_method(cfg: dict):
-    """Legacy Shadowsocks nodes predate per-node method storage."""
-    return shadowsocks_method(cfg.get("method") or DEFAULT_SS_METHOD)
-
-
 def reality_values(server_name: str | None, destination: str | None):
-    name = (server_name or "www.apple.com").strip()
+    name = (server_name or "www.atlasobscura.com").strip()
     if not name or "://" in name or any(character in name for character in "/?# "):
         raise HTTPException(422, "SNI 域名格式不正确")
     target = (destination or f"{name}:443").strip()
@@ -352,11 +390,7 @@ def inbound(row):
             "udp": True,
         }
     elif row["protocol"] == "shadowsocks":
-        item["settings"] = {
-            "method": config_shadowsocks_method(cfg),
-            "password": cfg["password"],
-            "network": "tcp,udp",
-        }
+        item["settings"] = {"method": SS2022_METHOD, "password": cfg["password"], "network": "tcp,udp"}
     else:
         item["settings"] = {
             "clients": [{"id": cfg["uuid"], "flow": REALITY_FLOW, "email": row["name"]}],
@@ -491,6 +525,18 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
         return dict(TELEMETRY)
 
 
+def validate_native_xray_config():
+    try:
+        result = subprocess.run(
+            [str(NATIVE_XRAY_BIN), "run", "-test", "-config", str(XRAY_CONFIG_PATH)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise HTTPException(422, f"无法执行 Xray 配置验证：{exc}") from exc
+    if result.returncode:
+        raise HTTPException(422, (result.stderr or result.stdout).strip())
+
+
 def rebuild():
     global RUNTIME_DIRTY
     with STATE_LOCK:
@@ -501,21 +547,32 @@ def rebuild():
         rows = current_rows()
         old = XRAY_CONFIG_PATH.read_bytes() if XRAY_CONFIG_PATH.exists() else None
         write_config(rows)
-        container = xray_container()
-        if not container:
-            RUNTIME_DIRTY = True
-            return
-        check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
-        if check.exit_code:
-            if old is not None:
-                XRAY_CONFIG_PATH.write_bytes(old)
-            else:
-                XRAY_CONFIG_PATH.unlink(missing_ok=True)
-            raise HTTPException(422, check.output.decode(errors="replace"))
         raw_snapshot = {
             row["id"]: (int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"])) for row in current_rows()
         }
-        container.restart(timeout=15)
+        if RUNTIME_BACKEND == "native":
+            try:
+                validate_native_xray_config()
+            except HTTPException:
+                if old is not None:
+                    XRAY_CONFIG_PATH.write_bytes(old)
+                else:
+                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
+                raise
+            _systemctl("restart", XRAY_SERVICE)
+        else:
+            container = xray_container()
+            if not container:
+                RUNTIME_DIRTY = True
+                return
+            check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
+            if check.exit_code:
+                if old is not None:
+                    XRAY_CONFIG_PATH.write_bytes(old)
+                else:
+                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
+                raise HTTPException(422, check.output.decode(errors="replace"))
+            container.restart(timeout=15)
         with closing(connect_db()) as conn:
             for node_id, (raw_up, raw_down) in raw_snapshot.items():
                 conn.execute(
@@ -597,7 +654,7 @@ def link_for(row):
         password = quote(cfg["password"], safe="")
         return f"socks://{username}:{password}@{host}:{row['port']}#{name}"
     if row["protocol"] == "shadowsocks":
-        userinfo = f"{config_shadowsocks_method(cfg)}:{cfg['password']}"
+        userinfo = f"{SS2022_METHOD}:{cfg['password']}"
         auth = base64.urlsafe_b64encode(userinfo.encode()).decode().rstrip("=")
         return f"ss://{auth}@{host}:{row['port']}#{name}"
     query = urlencode(
@@ -617,8 +674,6 @@ def link_for(row):
 
 def serial(row):
     cfg = json.loads(row["config"])
-    if row["protocol"] == "shadowsocks":
-        cfg["method"] = config_shadowsocks_method(cfg)
     telemetry = TELEMETRY.get(row["id"]) or _telemetry_for_row(row, time.time(), 0)
     return {
         "id": row["id"],
@@ -675,22 +730,29 @@ async def handle_http(request, exc):
 
 @app.get("/healthz")
 def healthz():
-    statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
-    for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
-        if key == "netguard" and not NETGUARD_REQUIRED:
-            continue
-        try:
-            container = named_container(name)
-            if container:
-                container.reload()
-                statuses[key] = "running" if container.status == "running" else container.status
-            else:
-                statuses[key] = "starting"
-        except HTTPException:
-            pass
+    if RUNTIME_BACKEND == "native":
+        statuses = {
+            "xray": native_service_status(XRAY_SERVICE),
+            "netguard": "disabled" if not NETGUARD_REQUIRED else native_service_status(NETGUARD_SERVICE),
+        }
+    else:
+        statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
+        for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
+            if key == "netguard" and not NETGUARD_REQUIRED:
+                continue
+            try:
+                container = named_container(name)
+                if container:
+                    container.reload()
+                    statuses[key] = "running" if container.status == "running" else container.status
+                else:
+                    statuses[key] = "starting"
+            except HTTPException:
+                pass
     with closing(connect_db()) as conn:
         conn.execute("SELECT 1").fetchone()
-    return {"status": "ok", **statuses}
+    healthy = statuses["xray"] == "running" and statuses["netguard"] in {"running", "disabled"}
+    return JSONResponse({"status": "ok" if healthy else "degraded", **statuses}, status_code=200 if healthy else 503)
 
 
 @app.get("/login", response_class=HTMLResponse, response_model=None)
@@ -756,8 +818,7 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         if not cfg["username"]:
             raise HTTPException(422, "SOCKS 用户名不能为空")
     elif protocol == "shadowsocks":
-        method = shadowsocks_method(payload.method)
-        cfg = {"method": method, "password": shadowsocks_password(method, payload.password)}
+        cfg = {"method": SS2022_METHOD, "password": ss2022_key(payload.password)}
     else:
         server_name, destination = reality_values(payload.server_name, payload.destination)
         private_key, public_key = x25519()

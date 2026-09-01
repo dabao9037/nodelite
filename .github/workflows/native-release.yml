@@ -20,11 +20,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build standalone one-dir tarball with Xray 26.6.27
-        run: bash scripts/build-native-release.sh "${{ matrix.arch }}"
+      - name: Build standalone one-dir tarball in Debian 11 (GLIBC 2.31)
+        run: bash scripts/build-native-release-container.sh "${{ matrix.arch }}"
+      - name: Verify release GLIBC compatibility
+        run: bash scripts/verify-glibc-compat.sh "dist/nodelite-linux-${{ matrix.arch }}.tar.gz" 2.31
       - uses: actions/upload-artifact@v4
         with:
           name: nodelite-linux-${{ matrix.arch }}

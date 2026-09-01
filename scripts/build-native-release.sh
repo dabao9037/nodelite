@@ -25,8 +25,8 @@ mkdir -p "$PYI_DIST" "$PYI_WORK" "$PKG/bin" "$PKG/lib" "$PKG/config" \
   "$PKG/data" "$PKG/xray-config" "$PKG/systemd" "$ROOT/dist"
 
 "$PYTHON" -m venv "$BUILD/venv"
-"$BUILD/venv/bin/pip" install --disable-pip-version-check -q --upgrade pip wheel
-"$BUILD/venv/bin/pip" install --disable-pip-version-check -q -r "$ROOT/requirements-native.txt" pyinstaller
+"$BUILD/venv/bin/python" -m pip install --disable-pip-version-check -q --upgrade pip wheel
+"$BUILD/venv/bin/python" -m pip install --disable-pip-version-check -q -r "$ROOT/requirements-native.txt" pyinstaller
 
 build_one() {
   local name="$1" entry="$2"
@@ -87,6 +87,7 @@ find "$PKG/source" -type f -name '*.pyc' -delete
 
 printf '%s\n' "$XRAY_VERSION" > "$PKG/XRAY_VERSION"
 printf '%s\n' "$ARCH" > "$PKG/ARCH"
+printf '%s\n' "${NODELITE_GLIBC_MAX:-2.31}" > "$PKG/GLIBC_MAX"
 printf '%s\n' "${GITHUB_SHA:-local}" > "$PKG/BUILD_COMMIT"
 
 # Validate the exact package before compression.
@@ -96,6 +97,7 @@ test -x "$PKG/bin/nodelite-netguard"
 test -x "$PKG/bin/xray"
 test -x "$PKG/install.sh"
 for unit in panel gateway xray netguard; do test -s "$PKG/systemd/nodelite-$unit.service"; done
+"$ROOT/scripts/verify-glibc-compat.sh" "$PKG" "${NODELITE_GLIBC_MAX:-2.31}"
 
 rm -f "$OUT" "$OUT.sha256"
 tar -C "$PKG" -czf "$OUT" .

@@ -88,10 +88,10 @@ docker compose up -d --build
 `.github/workflows/native-release.yml` 在发布 Release 时为 amd64/arm64 构建并上传 tarball。也可以本地构建：
 
 ```bash
-bash scripts/build-native-release.sh amd64
+bash scripts/build-native-release-container.sh amd64
 ```
 
-构建脚本创建隔离 venv，安装 `requirements-native.txt` 和 PyInstaller，生成 three one-dir 应用，然后下载并嵌入 Xray 26.6.27。目标服务器无需 Python、pip 或编译器。
+构建脚本在 Debian 11 / GLIBC 2.31 容器中创建隔离 venv，安装 `requirements-native.txt` 和 PyInstaller，生成 three one-dir 应用，然后下载并嵌入 Xray 26.6.27。发布门禁会扫描包内全部 ELF，拒绝高于 GLIBC 2.31 的依赖；目标服务器无需 Python、pip 或编译器。
 
 ## Reality 伪装目标
 

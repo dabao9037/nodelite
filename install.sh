@@ -47,6 +47,21 @@ ensure_tools() {
 asset_arch() {
   case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) die "暂不支持架构：$(uname -m)";; esac
 }
+validate_release_compatibility() {
+  local release_dir="$1" expected_arch="$2" package_arch required_glibc host_glibc highest
+  package_arch="$(cat "$release_dir/ARCH" 2>/dev/null || true)"
+  [[ "$package_arch" == "$expected_arch" ]] || die "发行包架构不匹配：需要 $expected_arch，实际 ${package_arch:-未知}"
+  for item in bin/nodelite-panel bin/nodelite-gateway bin/nodelite-netguard bin/xray; do
+    [[ -x "$release_dir/$item" ]] || die "发行包缺少可执行文件：$item"
+  done
+  required_glibc="$(cat "$release_dir/GLIBC_MAX" 2>/dev/null || true)"
+  [[ "$required_glibc" =~ ^[0-9]+\.[0-9]+$ ]] || die "发行包缺少有效的 GLIBC_MAX 兼容性声明"
+  host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+  [[ "$host_glibc" =~ ^[0-9]+\.[0-9]+$ ]] || die "无法检测当前系统 glibc 版本"
+  highest="$(printf '%s\n%s\n' "$required_glibc" "$host_glibc" | sort -V | tail -n1)"
+  [[ "$highest" == "$host_glibc" ]] || die "当前系统 glibc $host_glibc 低于发行包要求 $required_glibc；尚未停止或替换现有服务"
+  info "发行包兼容性检查通过：架构=$package_arch，系统 glibc=$host_glibc，要求≥$required_glibc"
+}
 latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
   curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
@@ -305,6 +320,7 @@ install_or_update() {
   release_dir="$tmp/release"; backup_dir="$tmp/runtime-state"
   mkdir -p "$release_dir"
   tar -xzf "$tmp/release.tar.gz" -C "$release_dir"
+  validate_release_compatibility "$release_dir" "$arch"
   backup_runtime_state "$backup_dir"
   stop_legacy_docker
   stop_native_for_upgrade

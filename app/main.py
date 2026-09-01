@@ -58,8 +58,14 @@ else:
     DockerException = docker.errors.DockerException
     NotFound = docker.errors.NotFound
 
-SS2022_METHOD = "2022-blake3-aes-128-gcm"
-SS2022_KEY_BYTES = 16
+DEFAULT_SS_METHOD = "2022-blake3-aes-128-gcm"
+SS_METHOD_KEY_BYTES = {
+    "2022-blake3-aes-128-gcm": 16,
+    "2022-blake3-aes-256-gcm": 32,
+    "aes-128-gcm": None,
+    "aes-256-gcm": None,
+    "chacha20-poly1305": None,
+}
 REALITY_NETWORK = "raw"
 REALITY_FLOW = "xtls-rprx-vision"
 REALITY_FINGERPRINT = "chrome"
@@ -93,6 +99,7 @@ class NodeInput(ExpirationFields):
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
     password: str | None = None
+    method: str | None = None
     destination: str | None = None
     server_name: str | None = None
     max_connections: int | None = Field(default=None, ge=1, le=100000)
@@ -375,6 +382,33 @@ def is_expired(row, now: int | None = None):
     return expires_at is not None and expires_at <= (now if now is not None else int(time.time()))
 
 
+def shadowsocks_method(value: str | None) -> str:
+    method = (value or DEFAULT_SS_METHOD).strip().lower()
+    if method not in SS_METHOD_KEY_BYTES:
+        raise HTTPException(422, "不支持的 Shadowsocks 加密方式")
+    return method
+
+
+def shadowsocks_password(method: str, password: str | None) -> str:
+    key_bytes = SS_METHOD_KEY_BYTES[method]
+    if key_bytes is None:
+        return password or secrets.token_urlsafe(18)
+    if not password:
+        return base64.b64encode(secrets.token_bytes(key_bytes)).decode()
+    try:
+        decoded = base64.b64decode(password, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(422, "SS-2022 密钥必须是有效的 Base64") from exc
+    if len(decoded) != key_bytes:
+        raise HTTPException(422, f"该 SS-2022 加密方式需要 {key_bytes} 字节密钥")
+    return password
+
+
+def config_shadowsocks_method(config: dict) -> str:
+    # Configs written before cipher selection did not persist a method.
+    return shadowsocks_method(config.get("method"))
+
+
 def inbound(row):
     cfg = json.loads(row["config"])
     item = {
@@ -390,7 +424,11 @@ def inbound(row):
             "udp": True,
         }
     elif row["protocol"] == "shadowsocks":
-        item["settings"] = {"method": SS2022_METHOD, "password": cfg["password"], "network": "tcp,udp"}
+        item["settings"] = {
+            "method": config_shadowsocks_method(cfg),
+            "password": cfg["password"],
+            "network": "tcp,udp",
+        }
     else:
         item["settings"] = {
             "clients": [{"id": cfg["uuid"], "flow": REALITY_FLOW, "email": row["name"]}],
@@ -654,7 +692,7 @@ def link_for(row):
         password = quote(cfg["password"], safe="")
         return f"socks://{username}:{password}@{host}:{row['port']}#{name}"
     if row["protocol"] == "shadowsocks":
-        userinfo = f"{SS2022_METHOD}:{cfg['password']}"
+        userinfo = f"{config_shadowsocks_method(cfg)}:{cfg['password']}"
         auth = base64.urlsafe_b64encode(userinfo.encode()).decode().rstrip("=")
         return f"ss://{auth}@{host}:{row['port']}#{name}"
     query = urlencode(
@@ -674,6 +712,8 @@ def link_for(row):
 
 def serial(row):
     cfg = json.loads(row["config"])
+    if row["protocol"] == "shadowsocks":
+        cfg["method"] = config_shadowsocks_method(cfg)
     telemetry = TELEMETRY.get(row["id"]) or _telemetry_for_row(row, time.time(), 0)
     return {
         "id": row["id"],
@@ -818,7 +858,8 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         if not cfg["username"]:
             raise HTTPException(422, "SOCKS 用户名不能为空")
     elif protocol == "shadowsocks":
-        cfg = {"method": SS2022_METHOD, "password": ss2022_key(payload.password)}
+        method = shadowsocks_method(payload.method)
+        cfg = {"method": method, "password": shadowsocks_password(method, payload.password)}
     else:
         server_name, destination = reality_values(payload.server_name, payload.destination)
         private_key, public_key = x25519()

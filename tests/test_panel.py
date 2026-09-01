@@ -196,7 +196,7 @@ def test_create_and_serialize_all_three_protocols(panel, monkeypatch):
     assert shadowsocks.status_code == 201
     ss_auth = urlsplit(shadowsocks.json()["link"]).username
     ss_auth += "=" * (-len(ss_auth) % 4)
-    assert base64.urlsafe_b64decode(ss_auth).decode() == f"{module.SS2022_METHOD}:{key}"
+    assert base64.urlsafe_b64decode(ss_auth).decode() == f"{module.DEFAULT_SS_METHOD}:{key}"
     reality = client.post("/api/nodes", json={
         "name": "reality", "protocol": "vless", "port": 22004,
         "server_name": "www.example.com", "destination": "www.example.com:443",
@@ -213,6 +213,76 @@ def test_create_and_serialize_all_three_protocols(panel, monkeypatch):
     assert configuration["policy"]["system"]["statsInboundUplink"] is True
     assert configuration["api"]["listen"] == "127.0.0.1:10085"
     assert {item["tag"] for item in configuration["inbounds"]} == {"node-1", "node-2", "node-3"}
+
+
+def test_shadowsocks_backend_exposes_all_five_methods(panel):
+    module, _ = panel
+    assert module.DEFAULT_SS_METHOD == "2022-blake3-aes-128-gcm"
+    assert list(module.SS_METHOD_KEY_BYTES) == [
+        "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+        "aes-128-gcm", "aes-256-gcm", "chacha20-poly1305",
+    ]
+    assert "method" in module.NodeInput.model_fields
+
+
+def test_shadowsocks_selected_method_drives_config_link_and_serial(panel):
+    module, client = panel
+    login(client)
+    response = client.post("/api/nodes", json={
+        "name": "selected cipher", "protocol": "shadowsocks", "port": 22005,
+        "method": "chacha20-poly1305", "password": "ordinary-password",
+    })
+    assert response.status_code == 201
+    node = response.json()
+    assert node["config"]["method"] == "chacha20-poly1305"
+    auth = urlsplit(node["link"]).username
+    auth += "=" * (-len(auth) % 4)
+    assert base64.urlsafe_b64decode(auth).decode() == "chacha20-poly1305:ordinary-password"
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes WHERE id=1").fetchone()
+    assert module.inbound(row)["settings"]["method"] == "chacha20-poly1305"
+
+
+def test_shadowsocks_password_rules_and_invalid_method(panel):
+    module, client = panel
+    login(client)
+    key256 = base64.b64encode(b"x" * 32).decode()
+    valid = client.post("/api/nodes", json={
+        "name": "aes256", "protocol": "shadowsocks", "port": 22006,
+        "method": "2022-blake3-aes-256-gcm", "password": key256,
+    })
+    assert valid.status_code == 201
+    assert valid.json()["config"]["password"] == key256
+    wrong_size = client.post("/api/nodes", json={
+        "name": "bad key", "protocol": "shadowsocks", "port": 22007,
+        "method": "2022-blake3-aes-256-gcm", "password": base64.b64encode(b"short").decode(),
+    })
+    assert wrong_size.status_code == 422
+    invalid = client.post("/api/nodes", json={
+        "name": "bad method", "protocol": "shadowsocks", "port": 22008,
+        "method": "rc4-md5", "password": "x",
+    })
+    assert invalid.status_code == 422
+
+
+def test_legacy_shadowsocks_node_defaults_to_2022_aes128(panel):
+    module, _ = panel
+    key = base64.b64encode(b"0123456789abcdef").decode()
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            "INSERT INTO nodes(name,protocol,port,config,created_at) VALUES(?,?,?,?,?)",
+            ("legacy ss", "shadowsocks", 22009, json.dumps({"password": key}), 1),
+        )
+        connection.commit()
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes WHERE name='legacy ss'").fetchone()
+    assert module.config_shadowsocks_method(json.loads(row["config"])) == module.DEFAULT_SS_METHOD
+    assert module.inbound(row)["settings"]["method"] == module.DEFAULT_SS_METHOD
+    assert module.serial(row)["config"]["method"] == module.DEFAULT_SS_METHOD
+    auth = urlsplit(module.link_for(row)).username
+    auth += "=" * (-len(auth) % 4)
+    assert base64.urlsafe_b64decode(auth).decode() == f"{module.DEFAULT_SS_METHOD}:{key}"
 
 
 def test_traffic_mapping_rate_and_restart_baseline(panel):

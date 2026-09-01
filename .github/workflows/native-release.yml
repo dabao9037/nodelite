@@ -9,7 +9,27 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Verify source semantics
+        run: |
+          python -m py_compile app/main.py netguard/netguard.py gateway/server.py native/*.py
+          node --check app/static/app.js
+          python scripts/verify_native_release.py .
+      - name: Run native smoke and unit tests
+        run: |
+          bash scripts/test-native-smoke.sh
+          PYTHONPATH=. pytest -q
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:

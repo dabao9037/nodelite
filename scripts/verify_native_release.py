@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Verify NodeLite Reality presets and native installer access-output contract."""
+"""Verify release-critical UI data, backend semantics, and installer contracts."""
+import ast
+import json
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
@@ -9,22 +12,45 @@ script = (root / "app/static/app.js").read_text(encoding="utf-8")
 installer = (root / "install.sh").read_text(encoding="utf-8")
 docker_installer = (root / "install-docker.sh").read_text(encoding="utf-8")
 stylesheet = (root / "app/static/app.css").read_text(encoding="utf-8")
+backend = (root / "app/main.py").read_text(encoding="utf-8")
+targets_document = json.loads((root / "config/reality-targets.json").read_text(encoding="utf-8"))
 
-groups = {
-    "美国": ("www.atlasobscura.com", "www.backblaze.com"),
-    "英国": ("www.jodrellbank.net", "www.sciencemuseum.org.uk"),
-    "日本": ("www.animatetimes.com", "www.famitsu.com"),
-    "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
-    "欧洲": ("www.cern.ch", "www.gog.com"),
-    "香港": ("www.hkstp.org", "www.discoverhongkong.com"),
-}
-expected = {host for hosts in groups.values() for host in hosts}
-for label, hosts in groups.items():
+groups = targets_document["groups"]
+assert len(groups) == 6
+expected = {target["host"] for group in groups for target in group["targets"]}
+for group in groups:
+    label = group["label"].split(" · ", 1)[0]
     assert f'<optgroup label="{label}">' in page, label
-    for host in hosts:
+    for target in group["targets"]:
+        host = target["host"]
         assert page.count(f'<option value="{host}"') == 1, host
         assert host in script, host
 assert len(expected) == 12
+
+methods = [
+    "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+    "aes-128-gcm", "aes-256-gcm", "chacha20-poly1305",
+]
+tree = ast.parse(backend)
+assignments = {
+    node.targets[0].id: ast.literal_eval(node.value)
+    for node in tree.body
+    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+    and node.targets[0].id in {"DEFAULT_SS_METHOD", "SS_METHOD_KEY_BYTES"}
+}
+assert assignments["DEFAULT_SS_METHOD"] == methods[0]
+assert list(assignments["SS_METHOD_KEY_BYTES"]) == methods
+node_input = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "NodeInput")
+assert any(isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "method" for node in node_input.body)
+for marker in (
+    "config_shadowsocks_method(cfg)", "shadowsocks_method(payload.method)",
+    'cfg["method"] = config_shadowsocks_method(cfg)',
+    'userinfo = f"{config_shadowsocks_method(cfg)}:{cfg[\'password\']}"',
+):
+    assert marker in backend, marker
+html_protocols = re.findall(r'<button class="protocol"[^>]+data-proto="([^"]+)"', page)
+assert html_protocols == ["vless", "shadowsocks", "socks"], html_protocols
+assert re.findall(r'<option value="([^"]+)">[^<]+</option>', page[page.index('id="ssMethod"'):page.index('id="ssMethod"') + 700])[:5] == methods
 
 removed = (
     "www.apple.com", "www.microsoft.com", "www.bbc.co.uk", "www.gov.uk",
@@ -47,4 +73,4 @@ assert "DEFAULT_PORT=2060" not in installer
 assert "DEFAULT_PORT=2060" not in docker_installer
 assert "grid-template-columns: minmax(92px, auto)" in stylesheet
 assert ".node-meta .port strong { overflow: visible; text-overflow: clip; white-space: nowrap;" in stylesheet
-print("verified: 6 groups, 12 niche domains, removed legacy presets, non-empty username/password output")
+print("verified: Reality JSON groups[].targets, five SS methods/backend flow, protocol order, installer contracts")

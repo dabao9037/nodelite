@@ -252,9 +252,12 @@ wait_healthy() {
   die "服务 45 秒内未恢复健康，请查看上方状态"
 }
 show_access() {
-  local f="$INSTALL_DIR/config/nodelite.env"
-  printf '\n访问地址：http://%s:%s/%s/login\n用户名：%s\n安装目录：%s\n\n' \
-    "$(read_key "$f" PUBLIC_HOST)" "$(read_key "$f" LISTEN_PORT)" "$(read_key "$f" ACCESS_PATH)" "$(read_key "$f" ADMIN_USER)" "$INSTALL_DIR"
+  local f="$INSTALL_DIR/config/nodelite.env" host port path user password
+  host="$(read_key "$f" PUBLIC_HOST)"; port="$(read_key "$f" LISTEN_PORT)"; path="$(read_key "$f" ACCESS_PATH)"
+  user="$(read_key "$f" ADMIN_USER)"; password="$(read_key "$f" "$PASSWORD_KEY")"
+  [[ -n "$host" && -n "$port" && -n "$path" && -n "$user" && -n "$password" ]] || die "登录信息不完整，请运行 node 重设后台账号密码"
+  printf '\n访问地址：http://%s:%s/%s/login\n用户名：%s\n密码：%s\n安装目录：%s\n\n' \
+    "$host" "$port" "$path" "$user" "$password" "$INSTALL_DIR"
 }
 
 install_or_update() {

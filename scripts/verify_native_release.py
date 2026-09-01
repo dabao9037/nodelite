@@ -20,7 +20,7 @@ expected = {host for hosts in groups.values() for host in hosts}
 for label, hosts in groups.items():
     assert f'<optgroup label="{label}">' in page, label
     for host in hosts:
-        assert page.count(f'value="{host}"') == 1, host
+        assert page.count(f'<option value="{host}"') == 1, host
         assert host in script, host
 assert len(expected) == 12
 

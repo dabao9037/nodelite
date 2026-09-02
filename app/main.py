@@ -82,11 +82,17 @@ app = FastAPI(title="NodeLite", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 STATE_LOCK = threading.RLock()
+REBUILD_LOCK = threading.Lock()
+TELEMETRY_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
 WORKER: threading.Thread | None = None
 RATE_STATE: dict[int, tuple[int, int, float]] = {}
 TELEMETRY: dict[int, dict] = {}
 RUNTIME_DIRTY = False
+LAST_SERVICE_STATUSES = {
+    "xray": "starting",
+    "netguard": "starting" if NETGUARD_REQUIRED else "disabled",
+}
 
 
 class ExpirationFields(BaseModel):
@@ -131,6 +137,12 @@ class NodeInput(ExpirationFields, TrafficLimitFields):
 class NodeUpdate(ExpirationFields, TrafficLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     max_connections: int | None = Field(default=None, ge=1, le=100000)
+
+
+class TelemetrySample(dict):
+    def __init__(self, telemetry: dict[int, dict], exceeded_ids: list[int]):
+        super().__init__(telemetry)
+        self.exceeded_ids = exceeded_ids
 
 
 def connect_db():
@@ -253,6 +265,43 @@ def native_service_status(service: str) -> str:
         return "running" if running else (value if value != "active" else "unhealthy")
     except HTTPException:
         return "unavailable"
+
+
+def runtime_service_statuses() -> dict[str, str]:
+    if RUNTIME_BACKEND == "native":
+        return {
+            "xray": native_service_status(XRAY_SERVICE),
+            "netguard": "disabled" if not NETGUARD_REQUIRED else native_service_status(NETGUARD_SERVICE),
+        }
+    statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
+    for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
+        if key == "netguard" and not NETGUARD_REQUIRED:
+            continue
+        try:
+            container = named_container(name)
+            if container:
+                container.reload()
+                statuses[key] = "running" if container.status == "running" else container.status
+            else:
+                statuses[key] = "starting"
+        except HTTPException:
+            pass
+    return statuses
+
+
+def refresh_runtime_service_statuses() -> dict[str, str]:
+    statuses = runtime_service_statuses()
+    with TELEMETRY_LOCK:
+        LAST_SERVICE_STATUSES.update(statuses)
+        return dict(LAST_SERVICE_STATUSES)
+
+
+def mark_runtime_service_statuses(*, xray: str | None = None, netguard: str | None = None):
+    with TELEMETRY_LOCK:
+        if xray is not None:
+            LAST_SERVICE_STATUSES["xray"] = xray
+        if netguard is not None:
+            LAST_SERVICE_STATUSES["netguard"] = netguard
 
 
 def docker_client():
@@ -505,26 +554,6 @@ def current_rows():
         return conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
 
 
-def runtime_rows():
-    """Snapshot rows after applying any due expiry/quota state transitions."""
-    now = int(time.time())
-    with closing(connect_db()) as conn:
-        conn.execute(
-            "UPDATE nodes SET enabled=0 WHERE enabled=1 AND expires_at IS NOT NULL AND expires_at<=?",
-            (now,),
-        )
-        conn.execute(
-            """UPDATE nodes SET enabled=0
-               WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
-                 AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
-                   + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
-                   >= traffic_limit_mb * ?""",
-            (MIB,),
-        )
-        conn.commit()
-        return conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
-
-
 def write_config(rows=None):
     rows = rows if rows is not None else current_rows()
     XRAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -595,48 +624,53 @@ def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, flo
 
 
 def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections: dict[int, int] | None = None, now: float | None = None):
-    global RUNTIME_DIRTY
+    """Persist one Xray sample and return telemetry plus newly exceeded IDs.
+
+    Runtime enforcement deliberately happens in ``background_tick`` after this
+    function has released both SQLite and ``STATE_LOCK``. This keeps sampling
+    free of Xray restarts and prevents rebuild -> sample -> rebuild recursion.
+    """
     now = now if now is not None else time.time()
-    with STATE_LOCK:
-        stats = query_xray_stats() if stats is None else stats
-        rows = current_rows()
-        if connections is None:
-            connections = active_connections([row["port"] for row in rows])
-        with closing(connect_db()) as conn:
-            for row in rows:
-                values = stats.get(row["id"], {})
-                raw_up = max(0, int(values.get("uplink", 0)))
-                raw_down = max(0, int(values.get("downlink", 0)))
-                base_up = int(row["traffic_uplink_base"])
-                base_down = int(row["traffic_downlink_base"])
-                old_raw_up = int(row["traffic_uplink_raw"])
-                old_raw_down = int(row["traffic_downlink_raw"])
-                origin_up = int(row["traffic_uplink_origin"])
-                origin_down = int(row["traffic_downlink_origin"])
-                if raw_up < old_raw_up:
-                    base_up += max(0, old_raw_up - origin_up)
-                    origin_up = 0
-                if raw_down < old_raw_down:
-                    base_down += max(0, old_raw_down - origin_down)
-                    origin_down = 0
-                conn.execute(
-                    """UPDATE nodes SET traffic_uplink_base=?, traffic_downlink_base=?,
-                       traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_uplink_origin=?,
-                       traffic_downlink_origin=?, traffic_sampled_at=? WHERE id=?""",
-                    (base_up, base_down, raw_up, raw_down, origin_up, origin_down, now, row["id"]),
-                )
-            due = [row[0] for row in conn.execute(
-                """SELECT id FROM nodes WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
-                   AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
-                     + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
-                     >= traffic_limit_mb * ?""",
-                (MIB,),
-            )]
-            if due:
-                conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in due])
-                RUNTIME_DIRTY = True
-            conn.commit()
-            rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+    stats = query_xray_stats() if stats is None else stats
+    with closing(connect_db()) as conn:
+        rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+    if connections is None:
+        connections = active_connections([row["port"] for row in rows])
+    exceeded_ids = []
+    with STATE_LOCK, closing(connect_db()) as conn:
+        rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+        for row in rows:
+            values = stats.get(row["id"], {})
+            raw_up = max(0, int(values.get("uplink", 0)))
+            raw_down = max(0, int(values.get("downlink", 0)))
+            base_up = int(row["traffic_uplink_base"])
+            base_down = int(row["traffic_downlink_base"])
+            old_raw_up = int(row["traffic_uplink_raw"])
+            old_raw_down = int(row["traffic_downlink_raw"])
+            origin_up = int(row["traffic_uplink_origin"])
+            origin_down = int(row["traffic_downlink_origin"])
+            if raw_up < old_raw_up:
+                base_up += max(0, old_raw_up - origin_up)
+                origin_up = 0
+            if raw_down < old_raw_down:
+                base_down += max(0, old_raw_down - origin_down)
+                origin_down = 0
+            conn.execute(
+                """UPDATE nodes SET traffic_uplink_base=?, traffic_downlink_base=?,
+                   traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_uplink_origin=?,
+                   traffic_downlink_origin=?, traffic_sampled_at=? WHERE id=?""",
+                (base_up, base_down, raw_up, raw_down, origin_up, origin_down, now, row["id"]),
+            )
+        exceeded_ids = [row[0] for row in conn.execute(
+            """SELECT id FROM nodes WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
+               AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                 + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                 >= traffic_limit_mb * ?""",
+            (MIB,),
+        )]
+        conn.commit()
+        rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+    with TELEMETRY_LOCK:
         for row in rows:
             total_up, total_down = traffic_totals(row)
             previous = RATE_STATE.get(row["id"])
@@ -652,7 +686,7 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
         for stale_id in set(TELEMETRY) - live_ids:
             TELEMETRY.pop(stale_id, None)
             RATE_STATE.pop(stale_id, None)
-        return dict(TELEMETRY)
+        return TelemetrySample(dict(TELEMETRY), exceeded_ids)
 
 
 def validate_native_xray_config():
@@ -669,44 +703,42 @@ def validate_native_xray_config():
 
 def rebuild():
     global RUNTIME_DIRTY
-    with STATE_LOCK:
+    # Serialize rebuilds without monopolising STATE_LOCK while Xray validates
+    # and restarts. Panel HTTP and SQLite reads remain available throughout.
+    with REBUILD_LOCK:
+        with STATE_LOCK:
+            rows = current_rows()
+            old = XRAY_CONFIG_PATH.read_bytes() if XRAY_CONFIG_PATH.exists() else None
+            write_config(rows)
+            raw_snapshot = {
+                row["id"]: (
+                    int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"]),
+                    int(row["traffic_uplink_origin"]), int(row["traffic_downlink_origin"]),
+                ) for row in rows
+            }
         try:
-            sample_telemetry()
-        except Exception:
-            pass
-        rows = runtime_rows()
-        old = XRAY_CONFIG_PATH.read_bytes() if XRAY_CONFIG_PATH.exists() else None
-        write_config(rows)
-        raw_snapshot = {
-            row["id"]: (
-                int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"]),
-                int(row["traffic_uplink_origin"]), int(row["traffic_downlink_origin"]),
-            ) for row in current_rows()
-        }
-        if RUNTIME_BACKEND == "native":
-            try:
+            if RUNTIME_BACKEND == "native":
                 validate_native_xray_config()
-            except HTTPException:
-                if old is not None:
-                    XRAY_CONFIG_PATH.write_bytes(old)
-                else:
-                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
-                raise
-            _systemctl("restart", XRAY_SERVICE)
-        else:
-            container = xray_container()
-            if not container:
-                RUNTIME_DIRTY = True
-                return
-            check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
-            if check.exit_code:
-                if old is not None:
-                    XRAY_CONFIG_PATH.write_bytes(old)
-                else:
-                    XRAY_CONFIG_PATH.unlink(missing_ok=True)
-                raise HTTPException(422, check.output.decode(errors="replace"))
-            container.restart(timeout=15)
-        with closing(connect_db()) as conn:
+                _systemctl("restart", XRAY_SERVICE)
+            else:
+                container = xray_container()
+                if not container:
+                    RUNTIME_DIRTY = True
+                    return
+                check = container.exec_run(["xray", "run", "-test", "-config", "/etc/xray/config.json"])
+                if check.exit_code:
+                    raise HTTPException(422, check.output.decode(errors="replace"))
+                container.restart(timeout=15)
+            mark_runtime_service_statuses(xray="running")
+        except Exception:
+            if old is not None:
+                XRAY_CONFIG_PATH.write_bytes(old)
+            else:
+                XRAY_CONFIG_PATH.unlink(missing_ok=True)
+            mark_runtime_service_statuses(xray="unavailable")
+            RUNTIME_DIRTY = True
+            raise
+        with STATE_LOCK, closing(connect_db()) as conn:
             for node_id, (raw_up, raw_down, origin_up, origin_down) in raw_snapshot.items():
                 conn.execute(
                     """UPDATE nodes SET traffic_uplink_base=traffic_uplink_base+?,
@@ -720,6 +752,38 @@ def rebuild():
                 )
             conn.commit()
         RUNTIME_DIRTY = False
+
+
+def disable_exceeded_nodes(node_ids: list[int]) -> list[int]:
+    """Apply sampled quota transitions once, outside the sampling transaction."""
+    global RUNTIME_DIRTY
+    if not node_ids:
+        return []
+    placeholders = ",".join("?" for _ in node_ids)
+    with STATE_LOCK, closing(connect_db()) as conn:
+        applied = [row[0] for row in conn.execute(
+            f"SELECT id FROM nodes WHERE enabled=1 AND id IN ({placeholders})", node_ids
+        )]
+        if applied:
+            conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in applied])
+            conn.commit()
+    if applied:
+        RUNTIME_DIRTY = True
+    return applied
+
+
+def apply_runtime(*, sample_first: bool = True, force: bool = False):
+    """Persist counters, apply state transitions, then rebuild exactly once."""
+    global RUNTIME_DIRTY
+    if sample_first:
+        try:
+            exceeded_ids = sample_telemetry().exceeded_ids
+        except Exception:
+            exceeded_ids = []
+        disable_exceeded_nodes(exceeded_ids)
+    if force or RUNTIME_DIRTY:
+        rebuild()
+        reconcile_limits()
 
 
 def expire_due_nodes(now: int | None = None, apply_runtime: bool = True):
@@ -743,10 +807,10 @@ def expire_due_nodes(now: int | None = None, apply_runtime: bool = True):
 def background_tick():
     global RUNTIME_DIRTY
     expire_due_nodes(apply_runtime=False)
-    sample_telemetry()
-    if RUNTIME_DIRTY:
-        rebuild()
-        reconcile_limits()
+    sample = sample_telemetry()
+    disable_exceeded_nodes(getattr(sample, "exceeded_ids", []))
+    apply_runtime(sample_first=False)
+    refresh_runtime_service_statuses()
 
 
 def background_loop():
@@ -813,7 +877,9 @@ def serial(row):
     cfg = json.loads(row["config"])
     if row["protocol"] == "shadowsocks":
         cfg["method"] = config_shadowsocks_method(cfg)
-    telemetry = TELEMETRY.get(row["id"]) or _telemetry_for_row(row, time.time(), 0)
+    with TELEMETRY_LOCK:
+        telemetry = TELEMETRY.get(row["id"])
+    telemetry = telemetry or _telemetry_for_row(row, time.time(), 0)
     return {
         "id": row["id"],
         "name": row["name"],
@@ -869,25 +935,19 @@ async def handle_http(request, exc):
 
 @app.get("/healthz")
 def healthz():
-    if RUNTIME_BACKEND == "native":
-        statuses = {
-            "xray": native_service_status(XRAY_SERVICE),
-            "netguard": "disabled" if not NETGUARD_REQUIRED else native_service_status(NETGUARD_SERVICE),
-        }
-    else:
-        statuses = {"xray": "unavailable", "netguard": "disabled" if not NETGUARD_REQUIRED else "unavailable"}
-        for key, name in (("xray", XRAY_CONTAINER), ("netguard", NETGUARD_CONTAINER)):
-            if key == "netguard" and not NETGUARD_REQUIRED:
-                continue
-            try:
-                container = named_container(name)
-                if container:
-                    container.reload()
-                    statuses[key] = "running" if container.status == "running" else container.status
-                else:
-                    statuses[key] = "starting"
-            except HTTPException:
-                pass
+    # Liveness must never wait on Docker/systemctl while a quota rebuild is in
+    # progress. The worker refreshes these cached dependency statuses.
+    with TELEMETRY_LOCK:
+        statuses = dict(LAST_SERVICE_STATUSES)
+    with closing(connect_db()) as conn:
+        conn.execute("SELECT 1").fetchone()
+    return JSONResponse({"status": "ok", **statuses})
+
+
+@app.get("/readyz")
+def readyz():
+    """Strict dependency readiness, separate from the non-blocking liveness API."""
+    statuses = refresh_runtime_service_statuses()
     with closing(connect_db()) as conn:
         conn.execute("SELECT 1").fetchone()
     healthy = statuses["xray"] == "running" and statuses["netguard"] in {"running", "disabled"}
@@ -936,7 +996,9 @@ def nodes(_=Depends(require_admin)):
 def nodes_telemetry(_=Depends(require_admin)):
     with closing(connect_db()) as conn:
         rows = conn.execute("SELECT * FROM nodes ORDER BY id DESC").fetchall()
-    return [{"id": row["id"], **(TELEMETRY.get(row["id"]) or _telemetry_for_row(row, time.time(), 0))} for row in rows]
+    with TELEMETRY_LOCK:
+        telemetry = dict(TELEMETRY)
+    return [{"id": row["id"], **(telemetry.get(row["id"]) or _telemetry_for_row(row, time.time(), 0))} for row in rows]
 
 
 @app.post("/api/nodes", status_code=201)
@@ -979,14 +1041,12 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         except sqlite3.IntegrityError as exc:
             raise HTTPException(409, "端口已占用") from exc
     try:
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
     except Exception:
         with closing(connect_db()) as conn:
             conn.execute("DELETE FROM nodes WHERE id=?", (node_id,))
             conn.commit()
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
         return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
@@ -1015,8 +1075,7 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         )
         conn.commit()
     try:
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
     except Exception:
         with closing(connect_db()) as conn:
             conn.execute(
@@ -1026,8 +1085,7 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
                  old["traffic_limit_mb"], old["enabled"], node_id),
             )
             conn.commit()
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
         return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
@@ -1046,14 +1104,12 @@ def toggle(node_id: int, _=Depends(require_admin)):
         conn.execute("UPDATE nodes SET enabled=? WHERE id=?", (0 if row["enabled"] else 1, node_id))
         conn.commit()
     try:
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
     except Exception:
         with closing(connect_db()) as conn:
             conn.execute("UPDATE nodes SET enabled=? WHERE id=?", (row["enabled"], node_id))
             conn.commit()
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
         return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
@@ -1061,13 +1117,14 @@ def toggle(node_id: int, _=Depends(require_admin)):
 
 @app.post("/api/nodes/{node_id}/traffic/reset")
 def reset_traffic(node_id: int, _=Depends(require_admin)):
+    # Query Xray before taking STATE_LOCK; Docker/systemctl calls may be slow.
+    stats = query_xray_stats()
     with STATE_LOCK, closing(connect_db()) as conn:
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
         if not row:
             raise HTTPException(404, "节点不存在")
         # A reset must use the live Xray counters. Falling back to a stale DB
         # sample would make pre-reset bytes appear again on the next sample.
-        stats = query_xray_stats()
         current = stats.get(node_id, {})
         raw_up = max(0, int(current.get("uplink", 0)))
         raw_down = max(0, int(current.get("downlink", 0)))
@@ -1079,8 +1136,9 @@ def reset_traffic(node_id: int, _=Depends(require_admin)):
         )
         conn.commit()
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
-    RATE_STATE.pop(node_id, None)
-    TELEMETRY[node_id] = _telemetry_for_row(row, time.time(), 0)
+    with TELEMETRY_LOCK:
+        RATE_STATE.pop(node_id, None)
+        TELEMETRY[node_id] = _telemetry_for_row(row, time.time(), 0)
     return serial(row)
 
 
@@ -1093,19 +1151,18 @@ def delete(node_id: int, _=Depends(require_admin)):
         conn.execute("DELETE FROM nodes WHERE id=?", (node_id,))
         conn.commit()
     try:
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
     except Exception:
         with closing(connect_db()) as conn:
             columns = [key for key in row.keys()]
             placeholders = ",".join("?" for _ in columns)
             conn.execute(f"INSERT INTO nodes({','.join(columns)}) VALUES({placeholders})", tuple(row[key] for key in columns))
             conn.commit()
-        rebuild()
-        reconcile_limits()
+        apply_runtime(force=True)
         raise
-    TELEMETRY.pop(node_id, None)
-    RATE_STATE.pop(node_id, None)
+    with TELEMETRY_LOCK:
+        TELEMETRY.pop(node_id, None)
+        RATE_STATE.pop(node_id, None)
     return Response(status_code=204)
 
 

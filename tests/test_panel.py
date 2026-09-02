@@ -5,7 +5,9 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -230,11 +232,14 @@ def test_traffic_limit_exact_and_overage_auto_disable_without_affecting_unlimite
     })
     client.post("/api/nodes", json={"name": "unlimited", "protocol": "socks", "port": 22504})
     module.RUNTIME_DIRTY = False
-    telemetry = module.sample_telemetry({
+    sample = module.sample_telemetry({
         1: {"uplink": mib // 2, "downlink": mib // 2},
         2: {"uplink": mib, "downlink": 1},
         3: {"uplink": mib * 50, "downlink": mib * 50},
     }, {22502: 0, 22503: 0, 22504: 0}, now=1000)
+    assert sample.exceeded_ids == [1, 2]
+    assert module.disable_exceeded_nodes(sample.exceeded_ids) == [1, 2]
+    telemetry = sample
     assert telemetry[1]["traffic_exceeded"] is True
     assert telemetry[1]["status"] == "traffic_exceeded"
     assert telemetry[2]["traffic_exceeded"] is True
@@ -245,12 +250,143 @@ def test_traffic_limit_exact_and_overage_auto_disable_without_affecting_unlimite
 
     calls = []
     monkeypatch.setattr(module, "expire_due_nodes", lambda **kwargs: [])
-    monkeypatch.setattr(module, "sample_telemetry", lambda: calls.append("sample") or {})
+    monkeypatch.setattr(module, "sample_telemetry", lambda: calls.append("sample") or module.TelemetrySample({}, []))
     monkeypatch.setattr(module, "rebuild", lambda: calls.append("rebuild") or setattr(module, "RUNTIME_DIRTY", False))
     monkeypatch.setattr(module, "reconcile_limits", lambda: calls.append("limits"))
     module.RUNTIME_DIRTY = True
     module.background_tick()
     assert calls == ["sample", "rebuild", "limits"]
+
+
+def test_quota_background_rebuild_keeps_panel_responsive_and_runs_once(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    mib = 1024 * 1024
+    client.post("/api/nodes", json={
+        "name": "quota target", "protocol": "socks", "port": 22511, "traffic_limit_mb": 1,
+    })
+    client.post("/api/nodes", json={
+        "name": "unlimited peer", "protocol": "socks", "port": 22512,
+    })
+    module.RUNTIME_DIRTY = False
+
+    daemon_lock = threading.Lock()
+    restart_started = threading.Event()
+    allow_restart = threading.Event()
+    stats_calls = []
+
+    class Result:
+        exit_code = 0
+        output = b"Configuration OK"
+
+    class BlockingContainer:
+        status = "running"
+
+        def __init__(self):
+            self.restarts = 0
+
+        def exec_run(self, command):
+            return Result()
+
+        def restart(self, timeout):
+            self.restarts += 1
+            with daemon_lock:
+                restart_started.set()
+                assert allow_restart.wait(3)
+
+        def reload(self):
+            # Model the Docker daemon being occupied by the in-flight restart.
+            with daemon_lock:
+                return None
+
+    container = BlockingContainer()
+
+    def stats():
+        stats_calls.append(1)
+        return {1: {"uplink": mib, "downlink": 0}, 2: {"uplink": mib * 10, "downlink": 0}}
+
+    monkeypatch.setattr(module, "query_xray_stats", stats)
+    monkeypatch.setattr(module, "active_connections", lambda ports: {port: 0 for port in ports})
+    monkeypatch.setattr(module, "xray_container", lambda: container)
+    monkeypatch.setattr(module, "reconcile_limits", lambda: None)
+    monkeypatch.setattr(module, "runtime_service_statuses", lambda: {"xray": "running", "netguard": "disabled"})
+
+    worker = threading.Thread(target=module.background_tick, daemon=True)
+    worker.start()
+    assert restart_started.wait(1), "quota enforcement did not reach the Xray restart"
+
+    executor = ThreadPoolExecutor(max_workers=3)
+    try:
+        futures = {
+            "login": executor.submit(client.get, "/login"),
+            "health": executor.submit(client.get, "/healthz"),
+            "nodes": executor.submit(client.get, "/api/nodes"),
+        }
+        responses = {}
+        for name, future in futures.items():
+            try:
+                responses[name] = future.result(timeout=0.5)
+            except FutureTimeout as exc:
+                pytest.fail(f"{name} blocked behind quota enforcement: {exc}")
+        assert responses["login"].status_code == 200
+        assert responses["health"].status_code == 200
+        assert responses["nodes"].status_code == 200
+        assert module.STATE_LOCK.acquire(blocking=False), "quota rebuild held the panel state lock"
+        module.STATE_LOCK.release()
+    finally:
+        allow_restart.set()
+        worker.join(3)
+        executor.shutdown(wait=True)
+
+    assert not worker.is_alive(), "quota background thread deadlocked"
+    assert stats_calls == [1], "rebuild recursively sampled Xray after the quota sample"
+    assert container.restarts == 1
+    rows = client.get("/api/nodes").json()
+    assert {row["name"]: row["enabled"] for row in rows} == {
+        "quota target": False,
+        "unlimited peer": True,
+    }
+
+    module.background_tick()
+    assert container.restarts == 1, "the next sample repeated an already-applied quota rebuild"
+
+
+def test_failed_quota_restart_does_not_lock_panel(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "restart failure", "protocol": "socks", "port": 22513, "traffic_limit_mb": 1,
+    })
+    module.RUNTIME_DIRTY = False
+    mib = 1024 * 1024
+
+    class Result:
+        exit_code = 0
+        output = b"Configuration OK"
+
+    class BrokenContainer:
+        def exec_run(self, command):
+            return Result()
+
+        def restart(self, timeout):
+            raise RuntimeError("restart failed")
+
+    monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": mib, "downlink": 0}})
+    monkeypatch.setattr(module, "active_connections", lambda ports: {port: 0 for port in ports})
+    monkeypatch.setattr(module, "xray_container", lambda: BrokenContainer())
+    monkeypatch.setattr(module, "reconcile_limits", lambda: None)
+    monkeypatch.setattr(module, "runtime_service_statuses", lambda: {"xray": "unavailable", "netguard": "disabled"})
+
+    with pytest.raises(RuntimeError, match="restart failed"):
+        module.background_tick()
+
+    assert module.STATE_LOCK.acquire(blocking=False)
+    module.STATE_LOCK.release()
+    assert client.get("/login").status_code == 200
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.json()["status"] == "ok"
+    assert client.get("/api/nodes").status_code == 200
 
 
 def test_traffic_limit_persists_across_counter_reset_and_edit_preserves_usage(panel):
@@ -276,7 +412,8 @@ def test_traffic_reset_auth_and_raw_baseline_algorithm(panel, monkeypatch):
     client.post("/api/nodes", json={
         "name": "reset", "protocol": "socks", "port": 22506, "traffic_limit_mb": 1,
     })
-    module.sample_telemetry({1: {"uplink": 700000, "downlink": 400000}}, {22506: 0}, now=1000)
+    sample = module.sample_telemetry({1: {"uplink": 700000, "downlink": 400000}}, {22506: 0}, now=1000)
+    module.disable_exceeded_nodes(sample.exceeded_ids)
     assert client.get("/api/nodes").json()[0]["traffic_exceeded"] is True
     monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": 700000, "downlink": 400000}})
     reset = client.post("/api/nodes/1/traffic/reset")
@@ -295,7 +432,8 @@ def test_exceeded_toggle_blocked_until_limit_raised_or_cleared(panel):
     client.post("/api/nodes", json={
         "name": "blocked", "protocol": "socks", "port": 22507, "traffic_limit_mb": 1,
     })
-    module.sample_telemetry({1: {"uplink": 1024 * 1024, "downlink": 0}}, {22507: 0}, now=1000)
+    sample = module.sample_telemetry({1: {"uplink": 1024 * 1024, "downlink": 0}}, {22507: 0}, now=1000)
+    module.disable_exceeded_nodes(sample.exceeded_ids)
     blocked = client.post("/api/nodes/1/toggle")
     assert blocked.status_code == 409
     assert "流量" in blocked.json()["detail"]
@@ -476,11 +614,11 @@ def test_rebuild_validates_then_restarts_and_rolls_back(panel, monkeypatch):
     container = Container()
     monkeypatch.setattr(module, "xray_container", lambda: container)
     # The startup worker may have begun an in-flight rebuild before this test
-    # installs its fakes. Serialize with the same lock, then reset observations.
-    with module.STATE_LOCK:
+    # installs its fakes. Serialize with the dedicated rebuild lock first.
+    with module.REBUILD_LOCK:
         container.commands.clear()
         container.restarts = 0
-        module.rebuild()
+    module.rebuild()
     assert container.commands == [["xray", "run", "-test", "-config", "/etc/xray/config.json"]]
     assert container.restarts == 1
     assert json.loads(module.XRAY_CONFIG_PATH.read_text())["stats"] == {}
@@ -537,7 +675,8 @@ def test_native_health_is_strict(panel, monkeypatch):
     monkeypatch.setattr(module, "RUNTIME_BACKEND", "native")
     monkeypatch.setattr(module, "NETGUARD_REQUIRED", True)
     monkeypatch.setattr(module, "native_service_status", lambda service: "running" if service == module.XRAY_SERVICE else "unavailable")
-    response = client.get("/healthz")
+    assert client.get("/healthz").status_code == 200
+    response = client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
 

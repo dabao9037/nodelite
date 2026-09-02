@@ -39,7 +39,7 @@ services:
       - ./xray-config:/xray-config
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert d['status']=='ok' and d['netguard']=='running'"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)); assert d['status']=='ok' and d['netguard']=='running'"]
       interval: 20s
       timeout: 5s
       start_period: 30s

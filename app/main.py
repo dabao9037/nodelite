@@ -188,8 +188,10 @@ def init_db():
             (8, "traffic_limit_mb", "ALTER TABLE nodes ADD COLUMN traffic_limit_mb INTEGER"),
             (9, "traffic_uplink_origin", "ALTER TABLE nodes ADD COLUMN traffic_uplink_origin INTEGER NOT NULL DEFAULT 0"),
             (10, "traffic_downlink_origin", "ALTER TABLE nodes ADD COLUMN traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
+            (11, "disabled_reason", "ALTER TABLE nodes ADD COLUMN disabled_reason TEXT"),
         ]
         columns = _columns(conn)
+        legacy_without_disabled_reason = "disabled_reason" not in columns
         for version, column, statement in migrations:
             if column not in columns:
                 conn.execute(statement)
@@ -198,18 +200,47 @@ def init_db():
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?,?)",
                 (version, int(time.time())),
             )
-        conn.execute(
-            "UPDATE nodes SET enabled=0 WHERE enabled=1 AND expires_at IS NOT NULL AND expires_at<=?",
-            (int(time.time()),),
-        )
-        conn.execute(
-            """UPDATE nodes SET enabled=0
-               WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
-                 AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
-                   + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
-                   >= traffic_limit_mb * ?""",
-            (MIB,),
-        )
+        now = int(time.time())
+        if legacy_without_disabled_reason:
+            # Upgrade inference is deliberately conservative: expired wins
+            # over quota, quota is inferred only when persisted counters prove
+            # it, and every other legacy disabled row remains manual/unknown.
+            conn.execute(
+                """UPDATE nodes SET enabled=0, disabled_reason='expired'
+                   WHERE expires_at IS NOT NULL AND expires_at<=?""",
+                (now,),
+            )
+            conn.execute(
+                """UPDATE nodes SET enabled=0, disabled_reason='traffic_limit'
+                   WHERE disabled_reason IS NULL AND traffic_limit_mb IS NOT NULL
+                     AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                       + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                       >= traffic_limit_mb * ?""",
+                (MIB,),
+            )
+            conn.execute(
+                "UPDATE nodes SET disabled_reason='manual' WHERE enabled=0 AND disabled_reason IS NULL"
+            )
+        else:
+            # On normal restarts preserve the explicit reason already stored.
+            # Only active rows can acquire a new automatic stop reason.
+            conn.execute("UPDATE nodes SET disabled_reason=NULL WHERE enabled=1")
+            conn.execute(
+                """UPDATE nodes SET enabled=0, disabled_reason='expired'
+                   WHERE enabled=1 AND expires_at IS NOT NULL AND expires_at<=?""",
+                (now,),
+            )
+            conn.execute(
+                """UPDATE nodes SET enabled=0, disabled_reason='traffic_limit'
+                   WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
+                     AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                       + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                       >= traffic_limit_mb * ?""",
+                (MIB,),
+            )
+            conn.execute(
+                "UPDATE nodes SET disabled_reason='manual' WHERE enabled=0 AND disabled_reason IS NULL"
+            )
         conn.commit()
 
 
@@ -765,7 +796,10 @@ def disable_exceeded_nodes(node_ids: list[int]) -> list[int]:
             f"SELECT id FROM nodes WHERE enabled=1 AND id IN ({placeholders})", node_ids
         )]
         if applied:
-            conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in applied])
+            conn.executemany(
+                "UPDATE nodes SET enabled=0, disabled_reason='traffic_limit' WHERE id=?",
+                [(node_id,) for node_id in applied],
+            )
             conn.commit()
     if applied:
         RUNTIME_DIRTY = True
@@ -795,7 +829,10 @@ def expire_due_nodes(now: int | None = None, apply_runtime: bool = True):
         )]
         if not due:
             return []
-        conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in due])
+        conn.executemany(
+            "UPDATE nodes SET enabled=0, disabled_reason='expired' WHERE id=?",
+            [(node_id,) for node_id in due],
+        )
         conn.commit()
     RUNTIME_DIRTY = True
     if apply_runtime:
@@ -886,6 +923,7 @@ def serial(row):
         "protocol": row["protocol"],
         "port": row["port"],
         "enabled": bool(row["enabled"]),
+        "disabled_reason": row["disabled_reason"],
         "config": {key: value for key, value in cfg.items() if key != "private_key"},
         "link": link_for(row),
         "qr": f"api/nodes/{row['id']}/qr",
@@ -1069,9 +1107,25 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         traffic_limit_mb = old["traffic_limit_mb"]
         if "traffic_limit_mb" in payload.model_fields_set:
             traffic_limit_mb = payload.traffic_limit_mb
+        enabled = int(old["enabled"])
+        disabled_reason = old["disabled_reason"]
+        if new_expiry is not None and new_expiry <= int(time.time()):
+            enabled = 0
+            if old["enabled"] or disabled_reason is None:
+                disabled_reason = "expired"
+        elif disabled_reason == "expired" and (new_expiry is None or new_expiry > int(time.time())):
+            enabled = 1
+            disabled_reason = None
+        elif disabled_reason == "traffic_limit" and "traffic_limit_mb" in payload.model_fields_set:
+            used = sum(traffic_totals(old))
+            if traffic_limit_mb is None or used < traffic_limit_mb * MIB:
+                enabled = 1
+                disabled_reason = None
         conn.execute(
-            "UPDATE nodes SET name=?, expires_at=?, max_connections=?, traffic_limit_mb=? WHERE id=?",
-            (name, new_expiry, max_connections, traffic_limit_mb, node_id),
+            """UPDATE nodes SET name=?, expires_at=?, max_connections=?, traffic_limit_mb=?,
+               enabled=?, disabled_reason=? WHERE id=?""",
+            (name, new_expiry, max_connections, traffic_limit_mb,
+             enabled, disabled_reason, node_id),
         )
         conn.commit()
     try:
@@ -1080,9 +1134,9 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         with closing(connect_db()) as conn:
             conn.execute(
                 """UPDATE nodes SET name=?, expires_at=?, max_connections=?,
-                   traffic_limit_mb=?, enabled=? WHERE id=?""",
+                   traffic_limit_mb=?, enabled=?, disabled_reason=? WHERE id=?""",
                 (old["name"], old["expires_at"], old["max_connections"],
-                 old["traffic_limit_mb"], old["enabled"], node_id),
+                 old["traffic_limit_mb"], old["enabled"], old["disabled_reason"], node_id),
             )
             conn.commit()
         apply_runtime(force=True)
@@ -1101,13 +1155,20 @@ def toggle(node_id: int, _=Depends(require_admin)):
             raise HTTPException(409, "节点已到期，请先修改有效期")
         if not row["enabled"] and traffic_limit_values(row)["traffic_exceeded"]:
             raise HTTPException(409, "节点流量已达到上限，请先提高或清除上限，或重置已用流量")
-        conn.execute("UPDATE nodes SET enabled=? WHERE id=?", (0 if row["enabled"] else 1, node_id))
+        next_enabled = 0 if row["enabled"] else 1
+        conn.execute(
+            "UPDATE nodes SET enabled=?, disabled_reason=? WHERE id=?",
+            (next_enabled, None if next_enabled else "manual", node_id),
+        )
         conn.commit()
     try:
         apply_runtime(force=True)
     except Exception:
         with closing(connect_db()) as conn:
-            conn.execute("UPDATE nodes SET enabled=? WHERE id=?", (row["enabled"], node_id))
+            conn.execute(
+                "UPDATE nodes SET enabled=?, disabled_reason=? WHERE id=?",
+                (row["enabled"], row["disabled_reason"], node_id),
+            )
             conn.commit()
         apply_runtime(force=True)
         raise
@@ -1128,14 +1189,35 @@ def reset_traffic(node_id: int, _=Depends(require_admin)):
         current = stats.get(node_id, {})
         raw_up = max(0, int(current.get("uplink", 0)))
         raw_down = max(0, int(current.get("downlink", 0)))
+        old = dict(row)
+        enable_after_reset = not is_expired(row)
+        disabled_after_reset = None
+        if not enable_after_reset:
+            disabled_after_reset = row["disabled_reason"] if not row["enabled"] and row["disabled_reason"] else "expired"
         conn.execute(
             """UPDATE nodes SET traffic_uplink_base=0, traffic_downlink_base=0,
                traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_uplink_origin=?,
-               traffic_downlink_origin=?, traffic_sampled_at=? WHERE id=?""",
-            (raw_up, raw_down, raw_up, raw_down, time.time(), node_id),
+               traffic_downlink_origin=?, traffic_sampled_at=?, enabled=?, disabled_reason=?
+               WHERE id=?""",
+            (raw_up, raw_down, raw_up, raw_down, time.time(),
+             1 if enable_after_reset else 0, disabled_after_reset, node_id),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    try:
+        apply_runtime(sample_first=False, force=True)
+    except Exception:
+        with STATE_LOCK, closing(connect_db()) as conn:
+            columns = list(old)
+            assignments = ",".join(f"{column}=?" for column in columns if column != "id")
+            values = [old[column] for column in columns if column != "id"]
+            conn.execute(f"UPDATE nodes SET {assignments} WHERE id=?", (*values, node_id))
+            conn.commit()
+        try:
+            apply_runtime(sample_first=False, force=True)
+        except Exception:
+            pass
+        raise
     with TELEMETRY_LOCK:
         RATE_STATE.pop(node_id, None)
         TELEMETRY[node_id] = _telemetry_for_row(row, time.time(), 0)

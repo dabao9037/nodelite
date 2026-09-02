@@ -71,9 +71,84 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, 0, 0)
-    assert versions == 10
+    assert versions == 11
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
+
+
+def test_migration_infers_disabled_reason_and_persists_after_restart(tmp_path, monkeypatch):
+    db = tmp_path / "legacy-reasons.db"
+    connection = sqlite3.connect(db)
+    connection.execute("""CREATE TABLE nodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, protocol TEXT NOT NULL,
+      port INTEGER NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
+      config TEXT NOT NULL, created_at INTEGER NOT NULL,
+      expires_at INTEGER, max_connections INTEGER,
+      traffic_uplink_base INTEGER NOT NULL DEFAULT 0,
+      traffic_downlink_base INTEGER NOT NULL DEFAULT 0,
+      traffic_uplink_raw INTEGER NOT NULL DEFAULT 0,
+      traffic_downlink_raw INTEGER NOT NULL DEFAULT 0,
+      traffic_sampled_at REAL, traffic_limit_mb INTEGER,
+      traffic_uplink_origin INTEGER NOT NULL DEFAULT 0,
+      traffic_downlink_origin INTEGER NOT NULL DEFAULT 0)""")
+    rows = [
+        ("expired", 21010, 0, int(time.time()) - 10, 100, 1),
+        ("quota", 21011, 0, None, 2 * 1024 * 1024, 1),
+        ("manual", 21012, 0, None, 0, 10),
+        ("active", 21013, 1, None, 0, 10),
+    ]
+    for name, port, enabled, expires_at, used, limit in rows:
+        connection.execute(
+            """INSERT INTO nodes(name,protocol,port,enabled,config,created_at,expires_at,
+               traffic_uplink_base,traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (name, "socks", port, enabled, json.dumps({"username": "u", "password": "p"}),
+             1, expires_at, used, limit),
+        )
+    connection.commit(); connection.close()
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "x")
+    monkeypatch.setenv("APP_" + "SECRET", "y")
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    sys.modules.pop("app.main", None)
+    module = importlib.import_module("app.main")
+    module.init_db(); module.init_db()
+
+    connection = sqlite3.connect(db)
+    assert connection.execute(
+        "SELECT name,enabled,disabled_reason FROM nodes ORDER BY id"
+    ).fetchall() == [
+        ("expired", 0, "expired"),
+        ("quota", 0, "traffic_limit"),
+        ("manual", 0, "manual"),
+        ("active", 1, None),
+    ]
+    connection.close()
+
+
+def test_restart_preserves_manual_reason_even_when_node_is_over_quota(tmp_path, monkeypatch):
+    db = tmp_path / "preserve-manual.db"
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "x")
+    monkeypatch.setenv("APP_" + "SECRET", "y")
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    sys.modules.pop("app.main", None)
+    module = importlib.import_module("app.main")
+    module.init_db()
+    connection = sqlite3.connect(db)
+    connection.execute(
+        """INSERT INTO nodes(name,protocol,port,enabled,config,created_at,traffic_limit_mb,
+           traffic_uplink_base,disabled_reason) VALUES(?,?,?,?,?,?,?,?,?)""",
+        ("manual over quota", "socks", 21014, 0,
+         json.dumps({"username": "u", "password": "p"}), 1, 1, 2 * 1024 * 1024, "manual"),
+    )
+    connection.commit(); connection.close()
+
+    module.init_db()
+    connection = sqlite3.connect(db)
+    assert connection.execute(
+        "SELECT enabled,disabled_reason FROM nodes WHERE port=21014"
+    ).fetchone() == (0, "manual")
+    connection.close()
 
 
 def test_login_error_success_and_relative_redirects(panel):
@@ -416,14 +491,219 @@ def test_traffic_reset_auth_and_raw_baseline_algorithm(panel, monkeypatch):
     module.disable_exceeded_nodes(sample.exceeded_ids)
     assert client.get("/api/nodes").json()[0]["traffic_exceeded"] is True
     monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": 700000, "downlink": 400000}})
+    calls = []
+    monkeypatch.setattr(module, "rebuild", lambda: calls.append("rebuild") or setattr(module, "RUNTIME_DIRTY", False))
+    monkeypatch.setattr(module, "reconcile_limits", lambda: calls.append("limits"))
     reset = client.post("/api/nodes/1/traffic/reset")
     assert reset.status_code == 200
     assert reset.json()["traffic_used_bytes"] == 0
-    assert reset.json()["enabled"] is False
+    assert reset.json()["enabled"] is True
+    assert reset.json()["disabled_reason"] is None
+    assert calls == ["rebuild", "limits"]
     same = module.sample_telemetry({1: {"uplink": 700000, "downlink": 400000}}, {22506: 0}, now=1002)[1]
     assert same["traffic_used_bytes"] == 0
     increased = module.sample_telemetry({1: {"uplink": 700123, "downlink": 400077}}, {22506: 0}, now=1004)[1]
     assert increased["traffic_used_bytes"] == 200
+
+
+def test_reset_rebuild_failure_rolls_back_node_state(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "rollback reset", "protocol": "socks", "port": 22521, "traffic_limit_mb": 1,
+    })
+    _mark_quota_disabled(module, 1, 1024 * 1024, 22521)
+    monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": 1024 * 1024, "downlink": 0}})
+    attempts = []
+
+    def fail_both_times():
+        attempts.append(1)
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(module, "rebuild", fail_both_times)
+    monkeypatch.setattr(module, "reconcile_limits", lambda: None)
+
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        client.post("/api/nodes/1/traffic/reset")
+    with sqlite3.connect(module.DB_PATH) as connection:
+        enabled, reason, used = connection.execute(
+            "SELECT enabled,disabled_reason,traffic_uplink_base + traffic_uplink_raw-traffic_uplink_origin FROM nodes WHERE id=1"
+        ).fetchone()
+    assert (enabled, reason, used) == (0, "traffic_limit", 1024 * 1024)
+    assert len(attempts) == 2
+
+
+def test_update_rebuild_failure_rolls_back_auto_enable_and_reason(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "rollback edit", "protocol": "socks", "port": 22522, "traffic_limit_mb": 1,
+    })
+    _mark_quota_disabled(module, 1, 1024 * 1024, 22522)
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+    attempts = []
+
+    def fail_both_times():
+        attempts.append(1)
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(module, "rebuild", fail_both_times)
+    monkeypatch.setattr(module, "reconcile_limits", lambda: None)
+
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
+    with sqlite3.connect(module.DB_PATH) as connection:
+        assert connection.execute(
+            "SELECT enabled,disabled_reason,traffic_limit_mb FROM nodes WHERE id=1"
+        ).fetchone() == (0, "traffic_limit", 1)
+    assert len(attempts) == 2
+
+
+def test_traffic_reset_never_enables_expired_node(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "expired reset", "protocol": "socks", "port": 22514, "traffic_limit_mb": 1,
+    })
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE nodes SET enabled=0, disabled_reason='expired', expires_at=? WHERE id=1",
+            (int(time.time()) - 1,),
+        )
+        connection.commit()
+    monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": 2000000, "downlink": 0}})
+    calls = []
+    monkeypatch.setattr(module, "rebuild", lambda: calls.append("rebuild") or setattr(module, "RUNTIME_DIRTY", False))
+    monkeypatch.setattr(module, "reconcile_limits", lambda: calls.append("limits"))
+
+    reset = client.post("/api/nodes/1/traffic/reset")
+    assert reset.status_code == 200
+    assert reset.json()["traffic_used_bytes"] == 0
+    assert reset.json()["enabled"] is False
+    assert reset.json()["disabled_reason"] == "expired"
+    assert reset.json()["expired"] is True
+    assert calls == ["rebuild", "limits"]
+
+
+def _mark_quota_disabled(module, node_id, used_bytes, port):
+    sample = module.sample_telemetry(
+        {node_id: {"uplink": used_bytes, "downlink": 0}}, {port: 0}, now=1000
+    )
+    module.disable_exceeded_nodes(sample.exceeded_ids)
+
+
+def test_quota_edit_auto_enables_only_when_new_limit_allows(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    mib = 1024 * 1024
+    client.post("/api/nodes", json={
+        "name": "raise me", "protocol": "socks", "port": 22515, "traffic_limit_mb": 1,
+    })
+    _mark_quota_disabled(module, 1, mib, 22515)
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+
+    still_exceeded = client.put("/api/nodes/1", json={"traffic_limit_mb": 1})
+    assert still_exceeded.status_code == 200
+    assert still_exceeded.json()["enabled"] is False
+    assert still_exceeded.json()["disabled_reason"] == "traffic_limit"
+
+    raised = client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
+    assert raised.status_code == 200
+    assert raised.json()["enabled"] is True
+    assert raised.json()["disabled_reason"] is None
+
+
+def test_quota_edit_clear_limit_auto_enables(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "clear me", "protocol": "socks", "port": 22516, "traffic_limit_mb": 1,
+    })
+    _mark_quota_disabled(module, 1, 1024 * 1024, 22516)
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+
+    cleared = client.put("/api/nodes/1", json={"traffic_limit_mb": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["enabled"] is True
+    assert cleared.json()["disabled_reason"] is None
+
+
+def test_manual_disable_is_not_reversed_by_raise_clear_or_ordinary_edit(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "manual", "protocol": "socks", "port": 22517, "traffic_limit_mb": 1,
+    })
+    assert client.post("/api/nodes/1/toggle").status_code == 200
+    disabled = client.get("/api/nodes").json()[0]
+    assert disabled["enabled"] is False
+    assert disabled["disabled_reason"] == "manual"
+    assert client.post("/api/nodes/1/toggle").json()["disabled_reason"] is None
+    assert client.post("/api/nodes/1/toggle").json()["disabled_reason"] == "manual"
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+
+    renamed = client.put("/api/nodes/1", json={"name": "still manual"})
+    assert renamed.json()["enabled"] is False
+    assert renamed.json()["disabled_reason"] == "manual"
+    raised = client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
+    assert raised.json()["enabled"] is False
+    assert raised.json()["disabled_reason"] == "manual"
+    cleared = client.put("/api/nodes/1", json={"traffic_limit_mb": None})
+    assert cleared.json()["enabled"] is False
+    assert cleared.json()["disabled_reason"] == "manual"
+
+
+def test_quota_auto_enable_does_not_cross_nodes_or_enable_expired(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    mib = 1024 * 1024
+    for name, port in (("target", 22518), ("peer", 22519), ("expired", 22520)):
+        client.post("/api/nodes", json={
+            "name": name, "protocol": "socks", "port": port, "traffic_limit_mb": 1,
+        })
+    sample = module.sample_telemetry(
+        {1: {"uplink": mib}, 2: {"uplink": mib}, 3: {"uplink": mib}},
+        {22518: 0, 22519: 0, 22520: 0}, now=1000,
+    )
+    module.disable_exceeded_nodes(sample.exceeded_ids)
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE nodes SET expires_at=?, disabled_reason='expired' WHERE id=3",
+            (int(time.time()) - 1,),
+        )
+        connection.commit()
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+
+    raised = client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
+    assert raised.json()["enabled"] is True
+    rows = {row["name"]: row for row in client.get("/api/nodes").json()}
+    assert rows["peer"]["enabled"] is False
+    assert rows["peer"]["disabled_reason"] == "traffic_limit"
+    assert rows["expired"]["enabled"] is False
+    expired_clear = client.put("/api/nodes/3", json={"traffic_limit_mb": None})
+    assert expired_clear.json()["enabled"] is False
+    assert expired_clear.json()["disabled_reason"] == "expired"
+
+
+def test_expired_reason_auto_enables_only_after_future_expiry_edit(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={"name": "renew", "protocol": "socks", "port": 22523})
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE nodes SET enabled=0, disabled_reason='expired', expires_at=? WHERE id=1",
+            (int(time.time()) - 1,),
+        )
+        connection.commit()
+    monkeypatch.setattr(module, "sample_telemetry", lambda *args, **kwargs: module.TelemetrySample({}, []))
+
+    renewed = client.put("/api/nodes/1", json={
+        "expiration_mode": "days", "expires_in_days": 1,
+    })
+    assert renewed.status_code == 200
+    assert renewed.json()["enabled"] is True
+    assert renewed.json()["disabled_reason"] is None
+    assert renewed.json()["expired"] is False
 
 
 def test_exceeded_toggle_blocked_until_limit_raised_or_cleared(panel):
@@ -439,10 +719,7 @@ def test_exceeded_toggle_blocked_until_limit_raised_or_cleared(panel):
     assert "流量" in blocked.json()["detail"]
     raised = client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
     assert raised.status_code == 200
-    assert client.post("/api/nodes/1/toggle").status_code == 200
-    client.post("/api/nodes/1/toggle")
-    assert client.put("/api/nodes/1", json={"traffic_limit_mb": None}).status_code == 200
-    assert client.post("/api/nodes/1/toggle").status_code == 200
+    assert raised.json()["enabled"] is True
 
 
 def test_traffic_limit_ui_controls_and_reset_button(panel):
@@ -456,6 +733,8 @@ def test_traffic_limit_ui_controls_and_reset_button(panel):
     assert "data-traffic-reset" in script
     assert "api/nodes/${reset.dataset.trafficReset}/traffic/reset" in script
     assert "确定将该节点已用流量归零吗" in script
+    assert "节点未到期时会自动启用并立即应用配置" in script
+    assert "提高到当前用量以上或清除上限会自动启用" in html
     assert "traffic-progress" in script and "traffic-progress" in css
     assert "traffic_limit_mb" in script
 

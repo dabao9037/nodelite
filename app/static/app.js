@@ -294,7 +294,7 @@ $('#list').addEventListener('click', async event => {
     } else if (toggle) {
       await api(`api/nodes/${toggle.dataset.toggle}/toggle`, {method: 'POST'});
       await load();
-    } else if (reset && confirm('确定将该节点已用流量归零吗？节点不会自动启用。')) {
+    } else if (reset && confirm('确定将该节点已用流量归零吗？节点未到期时会自动启用并立即应用配置。')) {
       await api(`api/nodes/${reset.dataset.trafficReset}/traffic/reset`, {method: 'POST'});
       await load();
     } else if (remove && confirm('确定删除这个节点吗？')) {

@@ -108,7 +108,7 @@
       <h2>编辑节点控制</h2>
       <label>节点名称<input id="editName" required></label>
       <label>最大并发连接<input id="editMaxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
-      <label>流量上限 (MB)<input id="editTrafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>修改上限不会清除已用流量。</small></label>
+      <label>流量上限 (MB)<input id="editTrafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>修改上限不会清除已用流量；因流量超限停用时，提高到当前用量以上或清除上限会自动启用（已到期或手动停用除外）。</small></label>
       <label>有效期
         <select id="editExpirationMode">
           <option value="never">永不过期</option>

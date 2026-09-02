@@ -26,7 +26,7 @@ import qrcode
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_BACKEND = os.getenv("RUNTIME_BACKEND", "native").strip().lower()
@@ -72,6 +72,8 @@ REALITY_FINGERPRINT = "chrome"
 REALITY_SPIDER_X = "/"
 XRAY_API_ADDRESS = "127.0.0.1:10085"
 XRAY_METRICS_ADDRESS = "127.0.0.1:11111"
+MIB = 1024 * 1024
+MAX_TRAFFIC_LIMIT_MB = 1_000_000_000
 
 if not ADMIN_CREDENTIAL or not SIGNING_SECRET:
     raise RuntimeError("Administrator credential and application signing secret are required")
@@ -93,7 +95,28 @@ class ExpirationFields(BaseModel):
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
 
 
-class NodeInput(ExpirationFields):
+class TrafficLimitFields(BaseModel):
+    traffic_limit_mb: int | None = None
+
+    @field_validator("traffic_limit_mb", mode="before")
+    @classmethod
+    def validate_traffic_limit_mb(cls, value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError("流量上限必须是整数 MB")
+        if isinstance(value, str):
+            if not value.strip().isdigit():
+                raise ValueError("流量上限必须是整数 MB")
+            value = int(value.strip())
+        if not isinstance(value, int):
+            raise ValueError("流量上限必须是整数 MB")
+        if not 1 <= value <= MAX_TRAFFIC_LIMIT_MB:
+            raise ValueError(f"流量上限必须在 1 到 {MAX_TRAFFIC_LIMIT_MB} MB 之间")
+        return value
+
+
+class NodeInput(ExpirationFields, TrafficLimitFields):
     name: str = Field(min_length=1, max_length=80)
     protocol: str
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -105,7 +128,7 @@ class NodeInput(ExpirationFields):
     max_connections: int | None = Field(default=None, ge=1, le=100000)
 
 
-class NodeUpdate(ExpirationFields):
+class NodeUpdate(ExpirationFields, TrafficLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     max_connections: int | None = Field(default=None, ge=1, le=100000)
 
@@ -150,6 +173,9 @@ def init_db():
             (5, "traffic_uplink_raw", "ALTER TABLE nodes ADD COLUMN traffic_uplink_raw INTEGER NOT NULL DEFAULT 0"),
             (6, "traffic_downlink_raw", "ALTER TABLE nodes ADD COLUMN traffic_downlink_raw INTEGER NOT NULL DEFAULT 0"),
             (7, "traffic_sampled_at", "ALTER TABLE nodes ADD COLUMN traffic_sampled_at REAL"),
+            (8, "traffic_limit_mb", "ALTER TABLE nodes ADD COLUMN traffic_limit_mb INTEGER"),
+            (9, "traffic_uplink_origin", "ALTER TABLE nodes ADD COLUMN traffic_uplink_origin INTEGER NOT NULL DEFAULT 0"),
+            (10, "traffic_downlink_origin", "ALTER TABLE nodes ADD COLUMN traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
         ]
         columns = _columns(conn)
         for version, column, statement in migrations:
@@ -163,6 +189,14 @@ def init_db():
         conn.execute(
             "UPDATE nodes SET enabled=0 WHERE enabled=1 AND expires_at IS NOT NULL AND expires_at<=?",
             (int(time.time()),),
+        )
+        conn.execute(
+            """UPDATE nodes SET enabled=0
+               WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
+                 AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                   + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                   >= traffic_limit_mb * ?""",
+            (MIB,),
         )
         conn.commit()
 
@@ -471,6 +505,26 @@ def current_rows():
         return conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
 
 
+def runtime_rows():
+    """Snapshot rows after applying any due expiry/quota state transitions."""
+    now = int(time.time())
+    with closing(connect_db()) as conn:
+        conn.execute(
+            "UPDATE nodes SET enabled=0 WHERE enabled=1 AND expires_at IS NOT NULL AND expires_at<=?",
+            (now,),
+        )
+        conn.execute(
+            """UPDATE nodes SET enabled=0
+               WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
+                 AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                   + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                   >= traffic_limit_mb * ?""",
+            (MIB,),
+        )
+        conn.commit()
+        return conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
+
+
 def write_config(rows=None):
     rows = rows if rows is not None else current_rows()
     XRAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -498,11 +552,33 @@ def query_xray_stats():
     return parse_xray_stats(xray_exec("api", "statsquery", f"--server={XRAY_API_ADDRESS}"))
 
 
+def traffic_totals(row) -> tuple[int, int]:
+    total_up = int(row["traffic_uplink_base"] + max(row["traffic_uplink_raw"] - row["traffic_uplink_origin"], 0))
+    total_down = int(row["traffic_downlink_base"] + max(row["traffic_downlink_raw"] - row["traffic_downlink_origin"], 0))
+    return max(0, total_up), max(0, total_down)
+
+
+def traffic_limit_values(row, used: int | None = None) -> dict:
+    used = sum(traffic_totals(row)) if used is None else max(0, int(used))
+    limit_mb = row["traffic_limit_mb"]
+    limit_bytes = None if limit_mb is None else int(limit_mb) * MIB
+    exceeded = limit_bytes is not None and used >= limit_bytes
+    return {
+        "traffic_limit_mb": limit_mb,
+        "traffic_limit_bytes": limit_bytes,
+        "traffic_used_bytes": used,
+        "traffic_remaining_bytes": None if limit_bytes is None else max(0, limit_bytes - used),
+        "traffic_percent": None if limit_bytes is None else round(used * 100 / limit_bytes, 2),
+        "traffic_exceeded": exceeded,
+    }
+
+
 def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, float] = (0.0, 0.0)):
     expires_at = row["expires_at"]
     expired = is_expired(row, int(now))
-    total_up = int(row["traffic_uplink_base"] + row["traffic_uplink_raw"])
-    total_down = int(row["traffic_downlink_base"] + row["traffic_downlink_raw"])
+    total_up, total_down = traffic_totals(row)
+    limit = traffic_limit_values(row, total_up + total_down)
+    status = "expired" if expired else ("traffic_exceeded" if limit["traffic_exceeded"] else ("active" if row["enabled"] else "disabled"))
     return {
         "traffic_uplink": total_up,
         "traffic_downlink": total_down,
@@ -513,11 +589,13 @@ def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, flo
         "expires_at": expires_at,
         "remaining_seconds": None if expires_at is None else max(0, expires_at - int(now)),
         "expired": expired,
-        "status": "expired" if expired else ("active" if row["enabled"] else "disabled"),
+        "status": status,
+        **limit,
     }
 
 
 def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections: dict[int, int] | None = None, now: float | None = None):
+    global RUNTIME_DIRTY
     now = now if now is not None else time.time()
     with STATE_LOCK:
         stats = query_xray_stats() if stats is None else stats
@@ -533,20 +611,34 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
                 base_down = int(row["traffic_downlink_base"])
                 old_raw_up = int(row["traffic_uplink_raw"])
                 old_raw_down = int(row["traffic_downlink_raw"])
+                origin_up = int(row["traffic_uplink_origin"])
+                origin_down = int(row["traffic_downlink_origin"])
                 if raw_up < old_raw_up:
-                    base_up += old_raw_up
+                    base_up += max(0, old_raw_up - origin_up)
+                    origin_up = 0
                 if raw_down < old_raw_down:
-                    base_down += old_raw_down
+                    base_down += max(0, old_raw_down - origin_down)
+                    origin_down = 0
                 conn.execute(
                     """UPDATE nodes SET traffic_uplink_base=?, traffic_downlink_base=?,
-                       traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_sampled_at=? WHERE id=?""",
-                    (base_up, base_down, raw_up, raw_down, now, row["id"]),
+                       traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_uplink_origin=?,
+                       traffic_downlink_origin=?, traffic_sampled_at=? WHERE id=?""",
+                    (base_up, base_down, raw_up, raw_down, origin_up, origin_down, now, row["id"]),
                 )
+            due = [row[0] for row in conn.execute(
+                """SELECT id FROM nodes WHERE enabled=1 AND traffic_limit_mb IS NOT NULL
+                   AND traffic_uplink_base + MAX(traffic_uplink_raw-traffic_uplink_origin, 0)
+                     + traffic_downlink_base + MAX(traffic_downlink_raw-traffic_downlink_origin, 0)
+                     >= traffic_limit_mb * ?""",
+                (MIB,),
+            )]
+            if due:
+                conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in due])
+                RUNTIME_DIRTY = True
             conn.commit()
             rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
         for row in rows:
-            total_up = int(row["traffic_uplink_base"] + row["traffic_uplink_raw"])
-            total_down = int(row["traffic_downlink_base"] + row["traffic_downlink_raw"])
+            total_up, total_down = traffic_totals(row)
             previous = RATE_STATE.get(row["id"])
             rate = (0.0, 0.0)
             if previous and now > previous[2]:
@@ -582,11 +674,14 @@ def rebuild():
             sample_telemetry()
         except Exception:
             pass
-        rows = current_rows()
+        rows = runtime_rows()
         old = XRAY_CONFIG_PATH.read_bytes() if XRAY_CONFIG_PATH.exists() else None
         write_config(rows)
         raw_snapshot = {
-            row["id"]: (int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"])) for row in current_rows()
+            row["id"]: (
+                int(row["traffic_uplink_raw"]), int(row["traffic_downlink_raw"]),
+                int(row["traffic_uplink_origin"]), int(row["traffic_downlink_origin"]),
+            ) for row in current_rows()
         }
         if RUNTIME_BACKEND == "native":
             try:
@@ -612,19 +707,22 @@ def rebuild():
                 raise HTTPException(422, check.output.decode(errors="replace"))
             container.restart(timeout=15)
         with closing(connect_db()) as conn:
-            for node_id, (raw_up, raw_down) in raw_snapshot.items():
+            for node_id, (raw_up, raw_down, origin_up, origin_down) in raw_snapshot.items():
                 conn.execute(
                     """UPDATE nodes SET traffic_uplink_base=traffic_uplink_base+?,
                        traffic_downlink_base=traffic_downlink_base+?,
-                       traffic_uplink_raw=0, traffic_downlink_raw=0
-                       WHERE id=? AND traffic_uplink_raw=? AND traffic_downlink_raw=?""",
-                    (raw_up, raw_down, node_id, raw_up, raw_down),
+                       traffic_uplink_raw=0, traffic_downlink_raw=0,
+                       traffic_uplink_origin=0, traffic_downlink_origin=0
+                       WHERE id=? AND traffic_uplink_raw=? AND traffic_downlink_raw=?
+                         AND traffic_uplink_origin=? AND traffic_downlink_origin=?""",
+                    (max(0, raw_up - origin_up), max(0, raw_down - origin_down),
+                     node_id, raw_up, raw_down, origin_up, origin_down),
                 )
             conn.commit()
         RUNTIME_DIRTY = False
 
 
-def expire_due_nodes(now: int | None = None):
+def expire_due_nodes(now: int | None = None, apply_runtime: bool = True):
     global RUNTIME_DIRTY
     now = now if now is not None else int(time.time())
     with STATE_LOCK, closing(connect_db()) as conn:
@@ -636,18 +734,19 @@ def expire_due_nodes(now: int | None = None):
         conn.executemany("UPDATE nodes SET enabled=0 WHERE id=?", [(node_id,) for node_id in due])
         conn.commit()
     RUNTIME_DIRTY = True
-    rebuild()
-    reconcile_limits()
+    if apply_runtime:
+        rebuild()
+        reconcile_limits()
     return due
 
 
 def background_tick():
     global RUNTIME_DIRTY
-    expire_due_nodes()
+    expire_due_nodes(apply_runtime=False)
+    sample_telemetry()
     if RUNTIME_DIRTY:
         rebuild()
         reconcile_limits()
-    sample_telemetry()
 
 
 def background_loop():
@@ -870,9 +969,10 @@ def create(payload: NodeInput, _=Depends(require_admin)):
     with STATE_LOCK, closing(connect_db()) as conn:
         try:
             cursor = conn.execute(
-                """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at, max_connections)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at, payload.max_connections),
+                """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
+                   max_connections, traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?)""",
+                (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
+                 payload.max_connections, payload.traffic_limit_mb),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -906,9 +1006,12 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         max_connections = old["max_connections"]
         if "max_connections" in payload.model_fields_set:
             max_connections = payload.max_connections
+        traffic_limit_mb = old["traffic_limit_mb"]
+        if "traffic_limit_mb" in payload.model_fields_set:
+            traffic_limit_mb = payload.traffic_limit_mb
         conn.execute(
-            "UPDATE nodes SET name=?, expires_at=?, max_connections=? WHERE id=?",
-            (name, new_expiry, max_connections, node_id),
+            "UPDATE nodes SET name=?, expires_at=?, max_connections=?, traffic_limit_mb=? WHERE id=?",
+            (name, new_expiry, max_connections, traffic_limit_mb, node_id),
         )
         conn.commit()
     try:
@@ -917,8 +1020,10 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
     except Exception:
         with closing(connect_db()) as conn:
             conn.execute(
-                "UPDATE nodes SET name=?, expires_at=?, max_connections=?, enabled=? WHERE id=?",
-                (old["name"], old["expires_at"], old["max_connections"], old["enabled"], node_id),
+                """UPDATE nodes SET name=?, expires_at=?, max_connections=?,
+                   traffic_limit_mb=?, enabled=? WHERE id=?""",
+                (old["name"], old["expires_at"], old["max_connections"],
+                 old["traffic_limit_mb"], old["enabled"], node_id),
             )
             conn.commit()
         rebuild()
@@ -936,6 +1041,8 @@ def toggle(node_id: int, _=Depends(require_admin)):
             raise HTTPException(404, "节点不存在")
         if not row["enabled"] and is_expired(row):
             raise HTTPException(409, "节点已到期，请先修改有效期")
+        if not row["enabled"] and traffic_limit_values(row)["traffic_exceeded"]:
+            raise HTTPException(409, "节点流量已达到上限，请先提高或清除上限，或重置已用流量")
         conn.execute("UPDATE nodes SET enabled=? WHERE id=?", (0 if row["enabled"] else 1, node_id))
         conn.commit()
     try:
@@ -950,6 +1057,31 @@ def toggle(node_id: int, _=Depends(require_admin)):
         raise
     with closing(connect_db()) as conn:
         return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
+
+
+@app.post("/api/nodes/{node_id}/traffic/reset")
+def reset_traffic(node_id: int, _=Depends(require_admin)):
+    with STATE_LOCK, closing(connect_db()) as conn:
+        row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "节点不存在")
+        # A reset must use the live Xray counters. Falling back to a stale DB
+        # sample would make pre-reset bytes appear again on the next sample.
+        stats = query_xray_stats()
+        current = stats.get(node_id, {})
+        raw_up = max(0, int(current.get("uplink", 0)))
+        raw_down = max(0, int(current.get("downlink", 0)))
+        conn.execute(
+            """UPDATE nodes SET traffic_uplink_base=0, traffic_downlink_base=0,
+               traffic_uplink_raw=?, traffic_downlink_raw=?, traffic_uplink_origin=?,
+               traffic_downlink_origin=?, traffic_sampled_at=? WHERE id=?""",
+            (raw_up, raw_down, raw_up, raw_down, time.time(), node_id),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    RATE_STATE.pop(node_id, None)
+    TELEMETRY[node_id] = _telemetry_for_row(row, time.time(), 0)
+    return serial(row)
 
 
 @app.delete("/api/nodes/{node_id}", status_code=204)

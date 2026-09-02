@@ -85,6 +85,7 @@
           <label id="expirationDateField" hidden>到期日期<input id="expiresAt" type="datetime-local"></label>
           <label id="expirationDaysField" hidden>有效天数<input id="expiresInDays" type="number" min="1" max="3650" value="30"></label>
           <label>最大并发连接<input id="maxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+          <label>流量上限 (MB)<input id="trafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>上传与下载累计合计达到上限后自动停用。</small></label>
         </div>
         <div id="error" class="error" role="alert" hidden></div>
         <button class="primary">生成节点 <b>→</b></button>
@@ -107,6 +108,7 @@
       <h2>编辑节点控制</h2>
       <label>节点名称<input id="editName" required></label>
       <label>最大并发连接<input id="editMaxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+      <label>流量上限 (MB)<input id="editTrafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>修改上限不会清除已用流量。</small></label>
       <label>有效期
         <select id="editExpirationMode">
           <option value="never">永不过期</option>

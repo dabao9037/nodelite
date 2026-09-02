@@ -83,6 +83,22 @@ docker compose up -d --build
 - `/healthz` 同时要求数据库、Xray、Netguard 健康，否则返回 HTTP 503 和 `status=degraded`。
 - 每次节点配置变更先用 Xray `run -test` 验证，成功后才重启 Xray；失败恢复旧配置。
 
+## 单节点流量上限
+
+创建或编辑节点时可选填“流量上限 (MB)”，范围为 `1..1,000,000,000`；留空表示不限。流量按 Xray 为该节点记录的**上传 + 下载累计总量**计算，`1 MB = 1024 × 1024 bytes`。
+
+- 达到或超过上限后，NodeLite 会在后台采样周期内自动停用节点，并重建 Xray 配置、同步 Netguard。
+- 累计值使用数据库持久基线，Xray/NodeLite 重启或原始 counter 回退不会归零，也不会重复计费。
+- 超限节点不能直接重新启用；需先提高/清除上限，或点击“重置流量”，再由用户明确点击启用。
+- 编辑上限默认保留已使用流量。清除上限只解除限制，不清除流量历史。
+- “重置流量”会把面板已用量归零，同时把当前 Xray counter 记为新的原始基准，避免下一次采样重新计入历史流量；重置不会自动启用节点。
+
+认证 API：
+
+```text
+POST /api/nodes/{id}/traffic/reset
+```
+
 ## Release 构建
 
 `.github/workflows/native-release.yml` 在发布 Release 时为 amd64/arm64 构建并上传 tarball。也可以本地构建：

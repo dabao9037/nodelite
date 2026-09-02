@@ -46,13 +46,19 @@ function expiryText(node) {
 
 function statusLabel(node) {
   if (node.expired) return 'EXPIRED';
+  if (node.traffic_exceeded) return '流量超限';
   return node.enabled ? 'ACTIVE' : 'DISABLED';
+}
+
+function trafficLimitText(node) {
+  if (!node.traffic_limit_bytes) return '不限流量';
+  return `${bytes(node.traffic_used_bytes)} / ${bytes(node.traffic_limit_bytes)}`;
 }
 
 function render() {
   $('#empty').hidden = nodes.length > 0;
   $('#list').innerHTML = nodes.map(node => `
-    <article class="node-card ${node.enabled ? '' : 'disabled'} ${node.expired ? 'expired' : ''}" data-node-id="${node.id}">
+    <article class="node-card ${node.enabled ? '' : 'disabled'} ${node.expired ? 'expired' : ''} ${node.traffic_exceeded ? 'traffic-exceeded' : ''}" data-node-id="${node.id}">
       <div class="node-head">
         <div><h3>${esc(node.name)}</h3><span class="tag">${protocolLabel(node.protocol)}</span></div>
         <span class="status status-${esc(node.status)}">${statusLabel(node)}</span>
@@ -66,9 +72,13 @@ function render() {
         <div><span>↑ 入站累计</span><strong data-uplink-total>${bytes(node.traffic_uplink)}</strong><small data-uplink-rate>${bytes(node.uplink_rate, true)}</small></div>
         <div><span>↓ 出站累计</span><strong data-downlink-total>${bytes(node.traffic_downlink)}</strong><small data-downlink-rate>${bytes(node.downlink_rate, true)}</small></div>
       </div>
+      <div class="traffic-limit">
+        <div><span>上传 + 下载流量</span><strong data-traffic-limit-text>${trafficLimitText(node)}</strong><small data-traffic-percent>${node.traffic_limit_bytes ? `${node.traffic_percent.toFixed(2)}%` : '未设置上限'}</small></div>
+        <progress class="traffic-progress" data-traffic-progress max="100" value="${Math.min(100, node.traffic_percent || 0)}" ${node.traffic_limit_bytes ? '' : 'hidden'}></progress>
+      </div>
       <div class="link"><input readonly aria-label="${esc(node.name)} 分享链接" value="${esc(node.link)}"><button type="button" data-copy="${esc(node.link)}">复制</button></div>
       <img class="qr" src="${esc(appUrl(node.qr))}" alt="${esc(node.name)} 节点二维码" loading="lazy">
-      <div class="actions"><button type="button" data-edit="${node.id}">编辑</button><button type="button" data-toggle="${node.id}" ${node.expired ? 'disabled title="请先编辑有效期"' : ''}>${node.enabled ? '停用' : '启用'}</button><button type="button" data-delete="${node.id}">删除</button></div>
+      <div class="actions"><button type="button" data-edit="${node.id}">编辑</button><button type="button" data-toggle="${node.id}" ${node.expired || node.traffic_exceeded ? `disabled title="${node.expired ? '请先编辑有效期' : '请先提高/清除上限或重置流量'}"` : ''}>${node.enabled ? '停用' : '启用'}</button><button type="button" data-traffic-reset="${node.id}">重置流量</button><button type="button" data-delete="${node.id}">删除</button></div>
     </article>
   `).join('');
 }
@@ -85,7 +95,7 @@ async function refreshTelemetry() {
   nodes = nodes.map(node => {
     const next = byId.get(node.id);
     if (!next) return node;
-    if (node.status !== next.status || node.enabled !== (next.status === 'active') || node.expired !== next.expired) structuralChange = true;
+    if (node.status !== next.status || node.enabled !== (next.status === 'active') || node.expired !== next.expired || node.traffic_exceeded !== next.traffic_exceeded) structuralChange = true;
     return {...node, ...next, enabled: next.status === 'active'};
   });
   if (structuralChange) { render(); return; }
@@ -98,6 +108,11 @@ async function refreshTelemetry() {
     card.querySelector('[data-downlink-rate]').textContent = bytes(node.downlink_rate, true);
     card.querySelector('[data-connection-value]').textContent = node.active_connections;
     card.querySelector('[data-expiry-value]').textContent = expiryText(node);
+    card.querySelector('[data-traffic-limit-text]').textContent = trafficLimitText(node);
+    card.querySelector('[data-traffic-percent]').textContent = node.traffic_limit_bytes ? `${node.traffic_percent.toFixed(2)}%` : '未设置上限';
+    const progress = card.querySelector('[data-traffic-progress]');
+    progress.hidden = !node.traffic_limit_bytes;
+    progress.value = Math.min(100, node.traffic_percent || 0);
   });
 }
 
@@ -231,6 +246,7 @@ $('#createForm').addEventListener('submit', async event => {
       name: $('#name').value, protocol,
       port: $('#port').value ? Number($('#port').value) : null,
       max_connections: $('#maxConnections').value ? Number($('#maxConnections').value) : null,
+      traffic_limit_mb: $('#trafficLimitMb').value ? Number($('#trafficLimitMb').value) : null,
       ...expirationPayload()
     };
     if (protocol === 'socks') {
@@ -258,6 +274,7 @@ $('#list').addEventListener('click', async event => {
   const copy = event.target.closest('[data-copy]');
   const edit = event.target.closest('[data-edit]');
   const toggle = event.target.closest('[data-toggle]');
+  const reset = event.target.closest('[data-traffic-reset]');
   const remove = event.target.closest('[data-delete]');
   try {
     if (copy) {
@@ -269,12 +286,16 @@ $('#list').addEventListener('click', async event => {
       $('#editId').value = node.id;
       $('#editName').value = node.name;
       $('#editMaxConnections').value = node.max_connections || '';
+      $('#editTrafficLimitMb').value = node.traffic_limit_mb || '';
       $('#editExpirationMode').value = node.expires_at ? 'date' : 'never';
       $('#editExpiresAt').value = localDateTime(node.expires_at);
       $('#editExpirationMode').dispatchEvent(new Event('change'));
       $('#editDialog').showModal();
     } else if (toggle) {
       await api(`api/nodes/${toggle.dataset.toggle}/toggle`, {method: 'POST'});
+      await load();
+    } else if (reset && confirm('确定将该节点已用流量归零吗？节点不会自动启用。')) {
+      await api(`api/nodes/${reset.dataset.trafficReset}/traffic/reset`, {method: 'POST'});
       await load();
     } else if (remove && confirm('确定删除这个节点吗？')) {
       await api(`api/nodes/${remove.dataset.delete}`, {method: 'DELETE'});
@@ -290,6 +311,7 @@ $('#editForm').addEventListener('submit', async event => {
     const body = {
       name: $('#editName').value,
       max_connections: $('#editMaxConnections').value ? Number($('#editMaxConnections').value) : null,
+      traffic_limit_mb: $('#editTrafficLimitMb').value ? Number($('#editTrafficLimitMb').value) : null,
       ...expirationPayload('edit')
     };
     await api(`api/nodes/${$('#editId').value}`, {method: 'PUT', body: JSON.stringify(body)});

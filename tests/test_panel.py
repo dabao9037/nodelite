@@ -69,8 +69,9 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, 0, 0)
-    assert versions == 7
+    assert versions == 10
     assert columns["traffic_uplink_base"][3] == 1
+    assert columns["traffic_limit_mb"][3] == 0
 
 
 def test_login_error_success_and_relative_redirects(panel):
@@ -184,6 +185,141 @@ def test_create_edit_validation_and_defaults(panel, monkeypatch):
     assert clear.status_code == 200
     assert clear.json()["max_connections"] is None
     assert clear.json()["expires_at"] is None
+
+
+def test_node_traffic_limit_create_edit_clear_and_validation(panel):
+    _, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "quota", "protocol": "socks", "port": 22501, "traffic_limit_mb": 10,
+    })
+    assert created.status_code == 201
+    node = created.json()
+    assert node["traffic_limit_mb"] == 10
+    assert node["traffic_limit_bytes"] == 10 * 1024 * 1024
+    assert node["traffic_used_bytes"] == 0
+    assert node["traffic_remaining_bytes"] == 10 * 1024 * 1024
+    assert node["traffic_percent"] == 0
+    assert node["traffic_exceeded"] is False
+
+    edited = client.put("/api/nodes/1", json={"traffic_limit_mb": 20})
+    assert edited.status_code == 200
+    assert edited.json()["traffic_limit_mb"] == 20
+    cleared = client.put("/api/nodes/1", json={"traffic_limit_mb": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["traffic_limit_mb"] is None
+    assert cleared.json()["traffic_limit_bytes"] is None
+    assert cleared.json()["traffic_remaining_bytes"] is None
+    assert cleared.json()["traffic_percent"] is None
+
+    for value in (0, 1_000_000_001, 1.5, "abc"):
+        invalid = client.put("/api/nodes/1", json={"traffic_limit_mb": value})
+        assert invalid.status_code == 422
+        assert "流量上限" in invalid.text
+
+
+def test_traffic_limit_exact_and_overage_auto_disable_without_affecting_unlimited(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    mib = 1024 * 1024
+    client.post("/api/nodes", json={
+        "name": "exact", "protocol": "socks", "port": 22502, "traffic_limit_mb": 1,
+    })
+    client.post("/api/nodes", json={
+        "name": "over", "protocol": "socks", "port": 22503, "traffic_limit_mb": 1,
+    })
+    client.post("/api/nodes", json={"name": "unlimited", "protocol": "socks", "port": 22504})
+    module.RUNTIME_DIRTY = False
+    telemetry = module.sample_telemetry({
+        1: {"uplink": mib // 2, "downlink": mib // 2},
+        2: {"uplink": mib, "downlink": 1},
+        3: {"uplink": mib * 50, "downlink": mib * 50},
+    }, {22502: 0, 22503: 0, 22504: 0}, now=1000)
+    assert telemetry[1]["traffic_exceeded"] is True
+    assert telemetry[1]["status"] == "traffic_exceeded"
+    assert telemetry[2]["traffic_exceeded"] is True
+    assert telemetry[3]["traffic_exceeded"] is False
+    assert module.RUNTIME_DIRTY is True
+    with sqlite3.connect(module.DB_PATH) as connection:
+        assert connection.execute("SELECT enabled FROM nodes ORDER BY id").fetchall() == [(0,), (0,), (1,)]
+
+    calls = []
+    monkeypatch.setattr(module, "expire_due_nodes", lambda **kwargs: [])
+    monkeypatch.setattr(module, "sample_telemetry", lambda: calls.append("sample") or {})
+    monkeypatch.setattr(module, "rebuild", lambda: calls.append("rebuild") or setattr(module, "RUNTIME_DIRTY", False))
+    monkeypatch.setattr(module, "reconcile_limits", lambda: calls.append("limits"))
+    module.RUNTIME_DIRTY = True
+    module.background_tick()
+    assert calls == ["sample", "rebuild", "limits"]
+
+
+def test_traffic_limit_persists_across_counter_reset_and_edit_preserves_usage(panel):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "persistent", "protocol": "socks", "port": 22505, "traffic_limit_mb": 100,
+    })
+    module.sample_telemetry({1: {"uplink": 1200, "downlink": 3000}}, {22505: 0}, now=1000)
+    module.sample_telemetry({1: {"uplink": 100, "downlink": 200}}, {22505: 0}, now=1002)
+    before = client.get("/api/nodes").json()[0]["traffic_used_bytes"]
+    assert before == 4500
+    edited = client.put("/api/nodes/1", json={"traffic_limit_mb": 200})
+    assert edited.status_code == 200
+    assert edited.json()["traffic_used_bytes"] == before
+
+
+def test_traffic_reset_auth_and_raw_baseline_algorithm(panel, monkeypatch):
+    module, client = panel
+    unauthenticated = client.post("/api/nodes/1/traffic/reset")
+    assert unauthenticated.status_code == 401
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "reset", "protocol": "socks", "port": 22506, "traffic_limit_mb": 1,
+    })
+    module.sample_telemetry({1: {"uplink": 700000, "downlink": 400000}}, {22506: 0}, now=1000)
+    assert client.get("/api/nodes").json()[0]["traffic_exceeded"] is True
+    monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": 700000, "downlink": 400000}})
+    reset = client.post("/api/nodes/1/traffic/reset")
+    assert reset.status_code == 200
+    assert reset.json()["traffic_used_bytes"] == 0
+    assert reset.json()["enabled"] is False
+    same = module.sample_telemetry({1: {"uplink": 700000, "downlink": 400000}}, {22506: 0}, now=1002)[1]
+    assert same["traffic_used_bytes"] == 0
+    increased = module.sample_telemetry({1: {"uplink": 700123, "downlink": 400077}}, {22506: 0}, now=1004)[1]
+    assert increased["traffic_used_bytes"] == 200
+
+
+def test_exceeded_toggle_blocked_until_limit_raised_or_cleared(panel):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={
+        "name": "blocked", "protocol": "socks", "port": 22507, "traffic_limit_mb": 1,
+    })
+    module.sample_telemetry({1: {"uplink": 1024 * 1024, "downlink": 0}}, {22507: 0}, now=1000)
+    blocked = client.post("/api/nodes/1/toggle")
+    assert blocked.status_code == 409
+    assert "流量" in blocked.json()["detail"]
+    raised = client.put("/api/nodes/1", json={"traffic_limit_mb": 2})
+    assert raised.status_code == 200
+    assert client.post("/api/nodes/1/toggle").status_code == 200
+    client.post("/api/nodes/1/toggle")
+    assert client.put("/api/nodes/1", json={"traffic_limit_mb": None}).status_code == 200
+    assert client.post("/api/nodes/1/toggle").status_code == 200
+
+
+def test_traffic_limit_ui_controls_and_reset_button(panel):
+    module, client = panel
+    login(client)
+    html = client.get("/").text
+    script = (Path(module.BASE_DIR) / "static/app.js").read_text()
+    css = (Path(module.BASE_DIR) / "static/app.css").read_text()
+    assert 'id="trafficLimitMb"' in html
+    assert 'id="editTrafficLimitMb"' in html
+    assert "data-traffic-reset" in script
+    assert "api/nodes/${reset.dataset.trafficReset}/traffic/reset" in script
+    assert "确定将该节点已用流量归零吗" in script
+    assert "traffic-progress" in script and "traffic-progress" in css
+    assert "traffic_limit_mb" in script
 
 
 def test_create_and_serialize_all_three_protocols(panel, monkeypatch):

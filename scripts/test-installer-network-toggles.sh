@@ -53,6 +53,7 @@ test_installer() {
     export NODELITE_ASSUME_YES=1
     # shellcheck disable=SC1090
     source "$functions"
+    trap - EXIT
     disable_ipv6
     enable_bbr_fq
     disable_ipv6

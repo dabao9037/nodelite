@@ -60,6 +60,7 @@ jobs:
           sudo bash scripts/test-installer-glibc-preflight.sh
           sudo bash scripts/test-installer-random-port.sh
           bash scripts/test-installer-tcpfit-git.sh
+          sudo bash scripts/test-installer-network-toggles.sh
           bash scripts/test-ui-port-display.sh
 
   fresh-install:

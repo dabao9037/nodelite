@@ -5,6 +5,8 @@ REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
 BIN_DIR="${NODELITE_BIN_DIR:-/usr/local/bin}"
+SYSCTL_DIR="${NODELITE_SYSCTL_DIR:-/etc/sysctl.d}"
+MODULES_LOAD_DIR="${NODELITE_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 INTERNAL_PORT=18080
 PASSWORD_KEY="ADMIN_""PASSWORD"
 SECRET_KEY="APP_""SECRET"
@@ -50,6 +52,112 @@ ensure_tools() {
     yum install -y ca-certificates "${packages[@]}"
   else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
   for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
+}
+
+ensure_network_tools() {
+  local missing=() cmd
+  for cmd in sysctl; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
+  ((${#missing[@]} == 0)) && return
+  warn "安装网络设置所需工具：${missing[*]}"
+  if command -v apt-get >/dev/null; then
+    apt-get update && apt-get install -y procps kmod
+  elif command -v dnf >/dev/null; then
+    dnf install -y procps-ng kmod
+  elif command -v yum >/dev/null; then
+    yum install -y procps-ng kmod
+  else
+    die "请先安装 sysctl（procps/procps-ng）"
+  fi
+  command -v sysctl >/dev/null 2>&1 || die "安装后仍找不到 sysctl"
+}
+
+confirm_network_change() {
+  [[ "${NODELITE_ASSUME_YES:-0}" == 1 ]] && return 0
+  local prompt="$1" answer
+  read -r -p "$prompt [y/N]: " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || { warn "已取消"; return 1; }
+}
+
+apply_managed_sysctl() {
+  local name="$1" content="$2" rollback="$3" file="$SYSCTL_DIR/$name" apply_file rollback_file backup=""
+  mkdir -p "$SYSCTL_DIR"
+  apply_file="$(mktemp "$SYSCTL_DIR/.nodelite-apply.XXXXXX")"
+  rollback_file="$(mktemp "$SYSCTL_DIR/.nodelite-rollback.XXXXXX")"
+  printf '%s\n' "$content" >"$apply_file"
+  printf '%s\n' "$rollback" >"$rollback_file"
+  chmod 0644 "$apply_file" "$rollback_file"
+  if ! sysctl -p "$apply_file" >/dev/null; then
+    sysctl -p "$rollback_file" >/dev/null 2>&1 || true
+    rm -f "$apply_file" "$rollback_file"
+    die "应用内核网络设置失败，运行时设置已回滚"
+  fi
+  if [[ -f "$file" ]] && cmp -s "$apply_file" "$file"; then
+    rm -f "$apply_file" "$rollback_file"
+    return 0
+  fi
+  if [[ -f "$file" ]]; then
+    backup="$file.bak.$(date +%Y%m%d%H%M%S)"
+    cp -a "$file" "$backup"
+  fi
+  if ! mv -f "$apply_file" "$file"; then
+    sysctl -p "$rollback_file" >/dev/null 2>&1 || true
+    [[ -z "$backup" ]] || cp -a "$backup" "$file"
+    rm -f "$apply_file" "$rollback_file"
+    die "持久化内核网络设置失败，运行时设置已回滚"
+  fi
+  chmod 0644 "$file"
+  rm -f "$rollback_file"
+}
+
+persist_bbr_modules() {
+  local file="$MODULES_LOAD_DIR/nodelite-bbr.conf" tmp
+  mkdir -p "$MODULES_LOAD_DIR"
+  tmp="$(mktemp "$MODULES_LOAD_DIR/.nodelite-bbr.XXXXXX")"
+  printf 'tcp_bbr\nsch_fq\n' >"$tmp"
+  chmod 0644 "$tmp"
+  if [[ -f "$file" ]] && cmp -s "$tmp" "$file"; then rm -f "$tmp"; else mv -f "$tmp" "$file"; fi
+}
+
+disable_ipv6() {
+  cat <<'EOF'
+关闭 IPv6 会立即影响现有 IPv6 连接；如果当前 SSH 走 IPv6，连接可能中断。
+设置会写入独立的 NodeLite sysctl 文件并持久生效，不改动其他 sysctl 文件。
+EOF
+  confirm_network_change "确认一键关闭 IPv6？" || return 0
+  ensure_network_tools
+  local old_all old_default
+  old_all="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || die "当前系统不支持或不允许修改 IPv6 sysctl"
+  old_default="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || die "当前系统不支持或不允许修改 IPv6 sysctl"
+  apply_managed_sysctl "99-zz-nodelite-disable-ipv6.conf" "# Managed by NodeLite
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1" "net.ipv6.conf.all.disable_ipv6 = $old_all
+net.ipv6.conf.default.disable_ipv6 = $old_default"
+  [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == 1 ]] || die "IPv6 全局关闭校验失败"
+  [[ "$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" == 1 ]] || die "IPv6 默认关闭校验失败"
+  ok "IPv6 已关闭，并已持久化到 $SYSCTL_DIR/99-zz-nodelite-disable-ipv6.conf"
+}
+
+enable_bbr_fq() {
+  cat <<'EOF'
+将启用 Linux BBR TCP 拥塞控制和 fq 默认队列规则，并写入独立的持久化 sysctl 文件。
+此操作不会改动 NodeLite 节点、端口或登录配置。
+EOF
+  confirm_network_change "确认一键开启 BBR + fq？" || return 0
+  ensure_network_tools
+  local old_qdisc old_cc available
+  old_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null)" || die "无法读取默认队列规则"
+  old_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" || die "无法读取当前 TCP 拥塞控制算法"
+  command -v modprobe >/dev/null 2>&1 && { modprobe tcp_bbr 2>/dev/null || true; modprobe sch_fq 2>/dev/null || true; }
+  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+  [[ " $available " == *" bbr "* ]] || die "当前内核不支持 BBR；可用算法：${available:-未知}"
+  apply_managed_sysctl "99-zz-nodelite-bbr-fq.conf" "# Managed by NodeLite
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr" "net.core.default_qdisc = $old_qdisc
+net.ipv4.tcp_congestion_control = $old_cc"
+  [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" == fq ]] || die "fq 启用校验失败"
+  [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == bbr ]] || die "BBR 启用校验失败"
+  persist_bbr_modules
+  ok "BBR + fq 已开启，并已持久化到 $SYSCTL_DIR/99-zz-nodelite-bbr-fq.conf"
 }
 
 ensure_git() {
@@ -424,10 +532,12 @@ menu() {
   8. TCPFit 网络调优（第三方）
   9. 卸载 NodeLite
  10. 可选 Docker 兼容安装
+ 11. 一键关闭 IPv6
+ 12. 一键开启 BBR + fq
   0. 退出
 ===================================================
 EOF
-  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) uninstall_nodelite;; 10) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) uninstall_nodelite;; 10) install_docker_mode;; 11) disable_ipv6;; 12) enable_bbr_fq;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|uninstall|docker|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|disable-ipv6|enable-bbr-fq|uninstall|docker|menu]";; esac

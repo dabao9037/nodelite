@@ -40,6 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh 
 8. TCPFit 网络调优（第三方，明确确认后才执行）
 9. 卸载 NodeLite
 10. 可选 Docker 兼容安装
+11. 一键关闭 IPv6
+12. 一键开启 BBR + fq
 0. 退出
 ```
 
@@ -128,6 +130,13 @@ bash scripts/build-native-release-container.sh amd64
 ## TCPFit
 
 TCPFit 来自 <https://github.com/Kylin010/tcpfit>，不是 NodeLite 组成部分。NodeLite 永不自动执行；菜单会先说明网络/SSH 风险并确认，再固定上游 commit、做 `bash -n` 并显示 SHA256。请准备云控制台/KVM 回退。
+
+## 一键网络设置
+
+- “一键关闭 IPv6”会设置 `net.ipv6.conf.all.disable_ipv6=1` 和 `net.ipv6.conf.default.disable_ipv6=1`。
+- “一键开启 BBR + fq”会先确认当前内核提供 BBR，再设置 `net.ipv4.tcp_congestion_control=bbr` 和 `net.core.default_qdisc=fq`。
+- 两项操作都会先提示确认，立即应用并校验结果，同时分别写入 `/etc/sysctl.d/99-zz-nodelite-*.conf` 持久化；不会覆盖其他 sysctl 文件。重复执行是幂等的。
+- 也可直接执行 `sudo nodelite disable-ipv6` 或 `sudo nodelite enable-bbr-fq`；自动化环境可显式设置 `NODELITE_ASSUME_YES=1` 跳过确认。
 
 ## 测试
 

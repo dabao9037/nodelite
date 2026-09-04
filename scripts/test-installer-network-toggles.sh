@@ -43,7 +43,8 @@ EOF
 chmod 0755 "$TMP/bin/sysctl" "$TMP/bin/modprobe"
 
 test_installer() {
-  local installer="$1" functions="$TMP/$(basename "$installer").functions.sh"
+  local installer="$1" functions
+  functions="$TMP/$(basename "$installer").functions.sh"
   sed '/^command="${1:-}"/,$d' "$installer" >"$functions"
   (
     export PATH="$TMP/bin:$PATH"

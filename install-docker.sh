@@ -114,7 +114,8 @@ confirm_network_change() {
 }
 
 apply_managed_sysctl() {
-  local name="$1" content="$2" rollback="$3" file="$SYSCTL_DIR/$name" apply_file rollback_file backup=""
+  local name="$1" content="$2" rollback="$3" file apply_file rollback_file backup=""
+  file="$SYSCTL_DIR/$name"
   mkdir -p "$SYSCTL_DIR"
   apply_file="$(mktemp "$SYSCTL_DIR/.nodelite-apply.XXXXXX")"
   rollback_file="$(mktemp "$SYSCTL_DIR/.nodelite-rollback.XXXXXX")"

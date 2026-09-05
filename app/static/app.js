@@ -65,7 +65,7 @@ function render() {
       </div>
       <div class="node-meta">
         <div class="port"><strong>${node.port}</strong><small>PORT</small></div>
-        <div><strong data-connection-value>${node.active_connections}</strong><small>连接 / ${node.max_connections || '不限'}</small></div>
+        <div><strong data-device-value>${node.active_devices}</strong><small>设备 / ${node.max_devices || '不限'}</small></div>
         <div><strong data-expiry-value>${esc(expiryText(node))}</strong><small>有效期</small></div>
       </div>
       <div class="metrics">
@@ -77,7 +77,7 @@ function render() {
         <progress class="traffic-progress" data-traffic-progress max="100" value="${Math.min(100, node.traffic_percent || 0)}" ${node.traffic_limit_bytes ? '' : 'hidden'}></progress>
       </div>
       <div class="link"><input readonly aria-label="${esc(node.name)} 分享链接" value="${esc(node.link)}"><button type="button" data-copy="${esc(node.link)}">复制</button></div>
-      <img class="qr" src="${esc(appUrl(node.qr))}" alt="${esc(node.name)} 节点二维码" loading="lazy">
+      <a class="qr-link" href="${esc(appUrl(node.qr))}" target="_blank" rel="noopener" title="打开原始二维码"><img class="qr" src="${esc(appUrl(node.qr))}" alt="${esc(node.name)} 节点二维码" loading="lazy"></a>
       <div class="actions"><button type="button" data-edit="${node.id}">编辑</button><button type="button" data-toggle="${node.id}" ${node.expired || node.traffic_exceeded ? `disabled title="${node.expired ? '请先编辑有效期' : '请先提高/清除上限或重置流量'}"` : ''}>${node.enabled ? '停用' : '启用'}</button><button type="button" data-traffic-reset="${node.id}">重置流量</button><button type="button" data-delete="${node.id}">删除</button></div>
     </article>
   `).join('');
@@ -106,7 +106,7 @@ async function refreshTelemetry() {
     card.querySelector('[data-downlink-total]').textContent = bytes(node.traffic_downlink);
     card.querySelector('[data-uplink-rate]').textContent = bytes(node.uplink_rate, true);
     card.querySelector('[data-downlink-rate]').textContent = bytes(node.downlink_rate, true);
-    card.querySelector('[data-connection-value]').textContent = node.active_connections;
+    card.querySelector('[data-device-value]').textContent = node.active_devices;
     card.querySelector('[data-expiry-value]').textContent = expiryText(node);
     card.querySelector('[data-traffic-limit-text]').textContent = trafficLimitText(node);
     card.querySelector('[data-traffic-percent]').textContent = node.traffic_limit_bytes ? `${node.traffic_percent.toFixed(2)}%` : '未设置上限';
@@ -245,7 +245,7 @@ $('#createForm').addEventListener('submit', async event => {
     const body = {
       name: $('#name').value, protocol,
       port: $('#port').value ? Number($('#port').value) : null,
-      max_connections: $('#maxConnections').value ? Number($('#maxConnections').value) : null,
+      max_devices: $('#maxDevices').value ? Number($('#maxDevices').value) : null,
       traffic_limit_mb: $('#trafficLimitMb').value ? Number($('#trafficLimitMb').value) : null,
       ...expirationPayload()
     };
@@ -285,7 +285,7 @@ $('#list').addEventListener('click', async event => {
       const node = nodes.find(item => item.id === Number(edit.dataset.edit));
       $('#editId').value = node.id;
       $('#editName').value = node.name;
-      $('#editMaxConnections').value = node.max_connections || '';
+      $('#editMaxDevices').value = node.max_devices || '';
       $('#editTrafficLimitMb').value = node.traffic_limit_mb || '';
       $('#editExpirationMode').value = node.expires_at ? 'date' : 'never';
       $('#editExpiresAt').value = localDateTime(node.expires_at);
@@ -310,7 +310,7 @@ $('#editForm').addEventListener('submit', async event => {
   try {
     const body = {
       name: $('#editName').value,
-      max_connections: $('#editMaxConnections').value ? Number($('#editMaxConnections').value) : null,
+      max_devices: $('#editMaxDevices').value ? Number($('#editMaxDevices').value) : null,
       traffic_limit_mb: $('#editTrafficLimitMb').value ? Number($('#editTrafficLimitMb').value) : null,
       ...expirationPayload('edit')
     };

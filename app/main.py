@@ -26,7 +26,7 @@ import qrcode
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_BACKEND = os.getenv("RUNTIME_BACKEND", "native").strip().lower()
@@ -122,7 +122,28 @@ class TrafficLimitFields(BaseModel):
         return value
 
 
-class NodeInput(ExpirationFields, TrafficLimitFields):
+class DeviceLimitFields(BaseModel):
+    max_devices: int | None = Field(default=None, ge=1, le=100000)
+    # Deprecated request alias retained for clients deployed before the device
+    # limit replaced the old aggregate TCP connection limit.
+    max_connections: int | None = Field(default=None, ge=1, le=100000)
+
+    @model_validator(mode="after")
+    def matching_device_limit_aliases(self):
+        fields = self.model_fields_set
+        if {"max_devices", "max_connections"}.issubset(fields) and self.max_devices != self.max_connections:
+            raise ValueError("max_devices 与旧字段 max_connections 不能冲突")
+        return self
+
+    def requested_device_limit(self):
+        if "max_devices" in self.model_fields_set:
+            return self.max_devices
+        if "max_connections" in self.model_fields_set:
+            return self.max_connections
+        return ...
+
+
+class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str = Field(min_length=1, max_length=80)
     protocol: str
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -131,12 +152,10 @@ class NodeInput(ExpirationFields, TrafficLimitFields):
     method: str | None = None
     destination: str | None = None
     server_name: str | None = None
-    max_connections: int | None = Field(default=None, ge=1, le=100000)
 
 
-class NodeUpdate(ExpirationFields, TrafficLimitFields):
+class NodeUpdate(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
-    max_connections: int | None = Field(default=None, ge=1, le=100000)
 
 
 class TelemetrySample(dict):
@@ -189,6 +208,7 @@ def init_db():
             (9, "traffic_uplink_origin", "ALTER TABLE nodes ADD COLUMN traffic_uplink_origin INTEGER NOT NULL DEFAULT 0"),
             (10, "traffic_downlink_origin", "ALTER TABLE nodes ADD COLUMN traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
             (11, "disabled_reason", "ALTER TABLE nodes ADD COLUMN disabled_reason TEXT"),
+            (12, "max_devices", "ALTER TABLE nodes ADD COLUMN max_devices INTEGER"),
         ]
         columns = _columns(conn)
         legacy_without_disabled_reason = "disabled_reason" not in columns
@@ -200,6 +220,11 @@ def init_db():
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?,?)",
                 (version, int(time.time())),
             )
+        # Preserve old databases and old API clients without changing the
+        # meaning of their stored value during an in-place upgrade.
+        conn.execute(
+            "UPDATE nodes SET max_devices=max_connections WHERE max_devices IS NULL AND max_connections IS NOT NULL"
+        )
         now = int(time.time())
         if legacy_without_disabled_reason:
             # Upgrade inference is deliberately conservative: expired wins
@@ -394,7 +419,7 @@ def reconcile_limits():
         netguard_exec("reconcile")
 
 
-def active_connections(ports: list[int]) -> dict[int, int]:
+def active_devices(ports: list[int]) -> dict[int, int]:
     if not ports:
         return {}
     if not NETGUARD_REQUIRED:
@@ -402,6 +427,11 @@ def active_connections(ports: list[int]) -> dict[int, int]:
     text = netguard_exec("status", *[str(port) for port in ports])
     payload = json.loads(text or "{}")
     return {port: int(payload.get(str(port), 0)) for port in ports}
+
+
+def active_connections(ports: list[int]) -> dict[int, int]:
+    """Deprecated internal alias retained for integrations/tests."""
+    return active_devices(ports)
 
 
 def free_port():
@@ -633,7 +663,14 @@ def traffic_limit_values(row, used: int | None = None) -> dict:
     }
 
 
-def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, float] = (0.0, 0.0)):
+def _device_limit(row):
+    keys = row.keys()
+    if "max_devices" in keys and row["max_devices"] is not None:
+        return row["max_devices"]
+    return row["max_connections"] if "max_connections" in keys else None
+
+
+def _telemetry_for_row(row, now: float, devices: int, rate: tuple[float, float] = (0.0, 0.0)):
     expires_at = row["expires_at"]
     expired = is_expired(row, int(now))
     total_up, total_down = traffic_totals(row)
@@ -644,8 +681,12 @@ def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, flo
         "traffic_downlink": total_down,
         "uplink_rate": max(0.0, rate[0]),
         "downlink_rate": max(0.0, rate[1]),
-        "active_connections": max(0, int(connections)),
-        "max_connections": row["max_connections"],
+        "active_devices": max(0, int(devices)),
+        "max_devices": _device_limit(row),
+        # Response aliases keep older dashboards/API consumers working. Their
+        # semantics are upgraded to source-IP devices, not TCP socket count.
+        "active_connections": max(0, int(devices)),
+        "max_connections": _device_limit(row),
         "expires_at": expires_at,
         "remaining_seconds": None if expires_at is None else max(0, expires_at - int(now)),
         "expired": expired,
@@ -654,7 +695,7 @@ def _telemetry_for_row(row, now: float, connections: int, rate: tuple[float, flo
     }
 
 
-def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections: dict[int, int] | None = None, now: float | None = None):
+def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, devices: dict[int, int] | None = None, now: float | None = None):
     """Persist one Xray sample and return telemetry plus newly exceeded IDs.
 
     Runtime enforcement deliberately happens in ``background_tick`` after this
@@ -665,8 +706,8 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
     stats = query_xray_stats() if stats is None else stats
     with closing(connect_db()) as conn:
         rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
-    if connections is None:
-        connections = active_connections([row["port"] for row in rows])
+    if devices is None:
+        devices = active_devices([row["port"] for row in rows])
     exceeded_ids = []
     with STATE_LOCK, closing(connect_db()) as conn:
         rows = conn.execute("SELECT * FROM nodes ORDER BY id").fetchall()
@@ -711,7 +752,7 @@ def sample_telemetry(stats: dict[int, dict[str, int]] | None = None, connections
                 rate = ((total_up - previous[0]) / elapsed, (total_down - previous[1]) / elapsed)
             RATE_STATE[row["id"]] = (total_up, total_down, now)
             TELEMETRY[row["id"]] = _telemetry_for_row(
-                row, now, connections.get(row["port"], 0), rate
+                row, now, devices.get(row["port"], 0), rate
             )
         live_ids = {row["id"] for row in rows}
         for stale_id in set(TELEMETRY) - live_ids:
@@ -1066,13 +1107,15 @@ def create(payload: NodeInput, _=Depends(require_admin)):
             "uuid": str(uuid.uuid4()), "private_key": private_key, "public_key": public_key,
             "short_id": secrets.token_hex(4), "server_name": server_name, "destination": destination,
         }
+    requested_device_limit = payload.requested_device_limit()
+    max_devices = None if requested_device_limit is ... else requested_device_limit
     with STATE_LOCK, closing(connect_db()) as conn:
         try:
             cursor = conn.execute(
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
-                   max_connections, traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?)""",
+                   max_connections, max_devices, traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
-                 payload.max_connections, payload.traffic_limit_mb),
+                 max_devices, max_devices, payload.traffic_limit_mb),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1101,9 +1144,10 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         if not name:
             raise HTTPException(422, "节点名称不能为空")
         new_expiry = old["expires_at"] if expires_at is ... else expires_at
-        max_connections = old["max_connections"]
-        if "max_connections" in payload.model_fields_set:
-            max_connections = payload.max_connections
+        max_devices = _device_limit(old)
+        requested_device_limit = payload.requested_device_limit()
+        if requested_device_limit is not ...:
+            max_devices = requested_device_limit
         traffic_limit_mb = old["traffic_limit_mb"]
         if "traffic_limit_mb" in payload.model_fields_set:
             traffic_limit_mb = payload.traffic_limit_mb
@@ -1122,9 +1166,9 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
                 enabled = 1
                 disabled_reason = None
         conn.execute(
-            """UPDATE nodes SET name=?, expires_at=?, max_connections=?, traffic_limit_mb=?,
+            """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?, traffic_limit_mb=?,
                enabled=?, disabled_reason=? WHERE id=?""",
-            (name, new_expiry, max_connections, traffic_limit_mb,
+            (name, new_expiry, max_devices, max_devices, traffic_limit_mb,
              enabled, disabled_reason, node_id),
         )
         conn.commit()
@@ -1133,9 +1177,9 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
     except Exception:
         with closing(connect_db()) as conn:
             conn.execute(
-                """UPDATE nodes SET name=?, expires_at=?, max_connections=?,
+                """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?,
                    traffic_limit_mb=?, enabled=?, disabled_reason=? WHERE id=?""",
-                (old["name"], old["expires_at"], old["max_connections"],
+                (old["name"], old["expires_at"], old["max_connections"], old["max_devices"],
                  old["traffic_limit_mb"], old["enabled"], old["disabled_reason"], node_id),
             )
             conn.commit()
@@ -1254,7 +1298,14 @@ def qr(node_id: int, _=Depends(require_admin)):
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
     if not row:
         raise HTTPException(404, "节点不存在")
-    image = qrcode.make(link_for(row), box_size=7, border=3)
+    code = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=12,
+        border=4,
+    )
+    code.add_data(link_for(row))
+    code.make(fit=True)
+    image = code.make_image(fill_color="black", back_color="white")
     output = BytesIO()
     image.save(output, "PNG")
     return Response(output.getvalue(), media_type="image/png")

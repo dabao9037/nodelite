@@ -17,7 +17,7 @@
     <section class="hero">
       <p class="eyebrow">MINIMAL XRAY NODE PANEL</p>
       <h1>节点管理，<em>实时可控。</em></h1>
-      <p>VLESS + Reality、Shadowsocks 和 SOCKS，带真实流量、有效期和服务端并发限制。</p>
+      <p>VLESS + Reality、Shadowsocks 和 SOCKS，带真实流量、有效期和服务端设备数限制。</p>
     </section>
     <section class="builder">
       <div class="protocol-picker">
@@ -84,7 +84,7 @@
           </label>
           <label id="expirationDateField" hidden>到期日期<input id="expiresAt" type="datetime-local"></label>
           <label id="expirationDaysField" hidden>有效天数<input id="expiresInDays" type="number" min="1" max="3650" value="30"></label>
-          <label>最大并发连接<input id="maxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+          <label>最大设备数<input id="maxDevices" type="number" min="1" max="100000" placeholder="留空表示不限"><small>按当前连接此节点的不同公网 IPv4 数量计算；同一 NAT 下多台设备计 1，切换网络后可能变化。受限节点暂不开放 IPv6。</small></label>
           <label>流量上限 (MB)<input id="trafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>上传与下载累计合计达到上限后自动停用。</small></label>
         </div>
         <div id="error" class="error" role="alert" hidden></div>
@@ -93,7 +93,7 @@
     </section>
     <section class="nodes">
       <div class="title">
-        <div><p class="eyebrow">LIVE NODE CONTROLS</p><h2>节点列表</h2><small class="live-note">每 2 秒刷新流量速率与活动连接数</small></div>
+        <div><p class="eyebrow">LIVE NODE CONTROLS</p><h2>节点列表</h2><small class="live-note">每 2 秒刷新流量速率与活动设备数（不同公网 IPv4）</small></div>
         <button id="refresh" class="circle" type="button" aria-label="刷新节点列表">↻</button>
       </div>
       <div id="empty" class="empty">还没有节点，从上方创建第一个。</div>
@@ -107,7 +107,7 @@
       <input id="editId" type="hidden">
       <h2>编辑节点控制</h2>
       <label>节点名称<input id="editName" required></label>
-      <label>最大并发连接<input id="editMaxConnections" type="number" min="1" max="100000" placeholder="留空表示不限"></label>
+      <label>最大设备数<input id="editMaxDevices" type="number" min="1" max="100000" placeholder="留空表示不限"><small>按不同公网 IPv4 计数；同一 NAT 多设备计 1，切网后可能变化。受限节点暂不开放 IPv6。</small></label>
       <label>流量上限 (MB)<input id="editTrafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>修改上限不会清除已用流量；因流量超限停用时，提高到当前用量以上或清除上限会自动启用（已到期或手动停用除外）。</small></label>
       <label>有效期
         <select id="editExpirationMode">

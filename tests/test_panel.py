@@ -11,9 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 
 @pytest.fixture()
@@ -68,10 +70,10 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     module.init_db(); module.init_db()
     connection = sqlite3.connect(db)
     columns = {row[1]: row for row in connection.execute("PRAGMA table_info(nodes)")}
-    row = connection.execute("SELECT name,expires_at,max_connections,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
+    row = connection.execute("SELECT name,expires_at,max_connections,max_devices,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
-    assert row == ("legacy", None, None, 0, 0)
-    assert versions == 11
+    assert row == ("legacy", None, None, None, 0, 0)
+    assert versions == 12
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
 
@@ -180,6 +182,49 @@ def test_prefix_safe_html_api_qr_and_redirect(panel):
     assert created.json()["qr"] == "api/nodes/1/qr"
     assert client.get("/node-panel/api/nodes/1/qr").headers["content-type"] == "image/png"
     assert client.get("/node-panel/api/nodes/telemetry").status_code == 200
+
+
+def test_device_limit_api_uses_device_names_and_accepts_legacy_payload(panel):
+    _, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "device limited", "protocol": "socks", "port": 21002,
+        "max_devices": 2,
+    })
+    assert created.status_code == 201
+    assert created.json()["max_devices"] == 2
+    assert created.json()["max_connections"] == 2
+    assert created.json()["active_devices"] == 0
+    assert created.json()["active_connections"] == 0
+
+    legacy = client.put("/api/nodes/1", json={
+        "name": "legacy payload", "max_connections": 3,
+        "expiration_mode": "never",
+    })
+    assert legacy.status_code == 200
+    assert legacy.json()["max_devices"] == 3
+    assert legacy.json()["max_connections"] == 3
+
+    conflict = client.put("/api/nodes/1", json={
+        "max_devices": 2, "max_connections": 4,
+    })
+    assert conflict.status_code == 422
+
+
+def test_qr_png_is_large_high_resolution_and_ui_opens_original(panel):
+    module, client = panel
+    login(client)
+    client.post("/api/nodes", json={"name": "qr", "protocol": "socks", "port": 21003})
+    response = client.get("/api/nodes/1/qr")
+    assert response.status_code == 200
+    image = Image.open(BytesIO(response.content))
+    assert image.format == "PNG"
+    assert image.width == image.height
+    assert image.width >= 350
+    javascript = (Path(module.BASE_DIR) / "static/app.js").read_text()
+    css = (Path(module.BASE_DIR) / "static/app.css").read_text()
+    assert 'class="qr-link"' in javascript
+    assert "width: 200px" in css or "width: 220px" in css
 
 
 def test_forwarded_prefix_scopes_session_cookie(panel):
@@ -381,7 +426,7 @@ def test_quota_background_rebuild_keeps_panel_responsive_and_runs_once(panel, mo
         return {1: {"uplink": mib, "downlink": 0}, 2: {"uplink": mib * 10, "downlink": 0}}
 
     monkeypatch.setattr(module, "query_xray_stats", stats)
-    monkeypatch.setattr(module, "active_connections", lambda ports: {port: 0 for port in ports})
+    monkeypatch.setattr(module, "active_devices", lambda ports: {port: 0 for port in ports})
     monkeypatch.setattr(module, "xray_container", lambda: container)
     monkeypatch.setattr(module, "reconcile_limits", lambda: None)
     monkeypatch.setattr(module, "runtime_service_statuses", lambda: {"xray": "running", "netguard": "disabled"})
@@ -447,7 +492,7 @@ def test_failed_quota_restart_does_not_lock_panel(panel, monkeypatch):
             raise RuntimeError("restart failed")
 
     monkeypatch.setattr(module, "query_xray_stats", lambda: {1: {"uplink": mib, "downlink": 0}})
-    monkeypatch.setattr(module, "active_connections", lambda ports: {port: 0 for port in ports})
+    monkeypatch.setattr(module, "active_devices", lambda ports: {port: 0 for port in ports})
     monkeypatch.setattr(module, "xray_container", lambda: BrokenContainer())
     monkeypatch.setattr(module, "reconcile_limits", lambda: None)
     monkeypatch.setattr(module, "runtime_service_statuses", lambda: {"xray": "unavailable", "netguard": "disabled"})
@@ -966,9 +1011,10 @@ def load_netguard(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     db = tmp_path / "guard.db"
     connection = sqlite3.connect(db)
-    connection.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,expires_at INTEGER)")
-    connection.executemany("INSERT INTO nodes VALUES(?,?,?,?,?)", [
-        (1, 30001, 1, 2, None), (2, 30002, 0, 3, None), (3, 30003, 1, None, None), (4, 30004, 1, 1, 10),
+    connection.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,max_devices INTEGER,expires_at INTEGER)")
+    connection.executemany("INSERT INTO nodes VALUES(?,?,?,?,?,?)", [
+        (1, 30001, 1, 99, 2, None), (2, 30002, 0, 3, 3, None),
+        (3, 30003, 1, None, None, None), (4, 30004, 1, 1, 1, 10),
     ])
     connection.commit(); connection.close()
     monkeypatch.setattr(module, "DB_PATH", str(db))
@@ -983,10 +1029,15 @@ def test_netguard_cold_start_without_database(tmp_path, monkeypatch):
     assert module.desired_rules(now=20) == []
 
     commands = []
-    monkeypatch.setattr(module, "ensure_jump", lambda: commands.append(("ensure",)))
-    monkeypatch.setattr(module, "run", lambda *args, check=True: commands.append(args) or "")
+    monkeypatch.setattr(module, "established_sources", lambda ports: {})
+    monkeypatch.setattr(module, "_ensure_table", lambda: commands.append(("ensure",)))
+    monkeypatch.setattr(module, "_apply_ruleset", lambda script: commands.append(("apply", script)))
+    monkeypatch.setattr(module, "_legacy_rollback", lambda: commands.append(("legacy",)))
     assert module.reconcile() == []
-    assert commands == [("ensure",), ("iptables", "-F", module.CHAIN)]
+    assert commands[0] == ("ensure",)
+    assert "flush table inet nodelite_netguard" in commands[1][1]
+    assert "hook input" in commands[1][1]
+    assert commands[2] == ("legacy",)
 
 
 def test_netguard_reads_live_wal_data(tmp_path, monkeypatch):
@@ -1005,38 +1056,62 @@ def test_netguard_reads_live_wal_data(tmp_path, monkeypatch):
     writer.close()
 
 
-def test_netguard_health_fails_when_iptables_probe_fails(tmp_path, monkeypatch):
+def test_netguard_health_fails_when_nft_probe_fails(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
 
     def failed_probe(*args, **kwargs):
-        raise RuntimeError("iptables unavailable")
+        raise RuntimeError("nft unavailable")
 
     monkeypatch.setattr(guard, "run", failed_probe)
-    with pytest.raises(RuntimeError, match="iptables unavailable"):
+    with pytest.raises(RuntimeError, match="nft unavailable"):
         guard.health()
 
 
-def test_connlimit_rule_generation_and_rollback(tmp_path, monkeypatch):
+def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_rollback(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
     assert guard.desired_rules(now=20) == [(1, 30001, 2)]
-    commands = []
-    monkeypatch.setattr(guard, "ensure_jump", lambda: commands.append(("ensure",)))
-    monkeypatch.setattr(guard, "run", lambda *args, check=True: commands.append(args) or "")
-    rules = guard.reconcile()
-    assert rules == [{"id": 1, "port": 30001, "limit": 2}]
-    text = " ".join(commands[-1])
-    assert "--dport 30001" in text
-    assert "--connlimit-above 2" in text
-    assert "--connlimit-mask 0" in text
-    assert "--syn" in text and "tcp-reset" in text
+    sources = {30001: {"1.1.1.1", "2001:db8::1"}}
+    script = guard.render_ruleset(guard.desired_rules(now=20), sources, timeout_seconds=17)
+    assert "type ipv4_addr . ipv6_addr" in script
+    assert "flags dynamic,timeout" in script
+    assert "timeout 17s; size 2" in script
+    assert "1.1.1.1 . :: timeout 17s" in script
+    assert "0.0.0.0 . 2001:db8::1 timeout 17s" in script
+    assert "meta nfproto ipv4" in script and "meta nfproto ipv6" in script
+    assert "ct state new add @devices_1" in script
+    assert "ct state new ip saddr . :: @devices_1 return" in script
+    assert "ct state new 0.0.0.0 . ip6 saddr @devices_1 return" in script
+    assert script.count("reject with tcp reset") == 2
+    assert "connlimit" not in script and "iptables -A" not in script
 
-    command_results = iter([0, 0, 1])
-    monkeypatch.setattr(guard.subprocess, "run", lambda *args, **kwargs: type("R", (), {"returncode": next(command_results)})())
+    calls = []
+    monkeypatch.setattr(guard, "established_sources", lambda ports: sources)
+    monkeypatch.setattr(guard, "_ensure_table", lambda: calls.append("ensure"))
+    monkeypatch.setattr(guard, "_apply_ruleset", lambda value: calls.append(value))
+    monkeypatch.setattr(guard, "_legacy_rollback", lambda: calls.append("legacy"))
+    rules = guard.reconcile()
+    assert rules == [{"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 2}]
+    assert calls[0] == "ensure" and calls[-1] == "legacy"
+
     rollback_commands = []
     monkeypatch.setattr(guard, "run", lambda *args, check=True: rollback_commands.append(args) or "")
+    monkeypatch.setattr(guard, "_legacy_rollback", lambda: rollback_commands.append(("legacy",)))
     guard.rollback()
-    assert ("iptables", "-D", "INPUT", "-j", guard.CHAIN) in rollback_commands
-    assert rollback_commands[-1] == ("iptables", "-X", guard.CHAIN)
+    assert ("nft", "delete", "table", "inet", "nodelite_netguard") in rollback_commands
+    assert rollback_commands[-1] == ("legacy",)
+
+
+def test_netguard_reconcile_is_idempotent_atomic_table_replacement(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    applied = []
+    monkeypatch.setattr(guard, "established_sources", lambda ports: {30001: {"2.2.2.2"}})
+    monkeypatch.setattr(guard, "_ensure_table", lambda: None)
+    monkeypatch.setattr(guard, "_apply_ruleset", applied.append)
+    monkeypatch.setattr(guard, "_legacy_rollback", lambda: None)
+    guard.reconcile(); guard.reconcile()
+    assert applied[0] == applied[1]
+    assert applied[0].count("flush table inet nodelite_netguard") == 1
+
 
 
 def test_netguard_daemon_rolls_back_on_sigterm_path(tmp_path, monkeypatch):
@@ -1055,8 +1130,14 @@ def test_netguard_daemon_rolls_back_on_sigterm_path(tmp_path, monkeypatch):
     assert calls == ["reconcile", "rollback"]
 
 
-def test_netguard_active_connection_mapping(tmp_path, monkeypatch):
+def test_netguard_active_device_mapping_counts_unique_ipv4_and_ipv6_sources(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
-    output = "0 0 127.0.0.1:30001 1.1.1.1:555\n0 0 [::]:30001 [::1]:9\n0 0 0.0.0.0:40000 2.2.2.2:1\n"
+    output = (
+        "0 0 127.0.0.1:30001 1.1.1.1:555\n"
+        "0 0 127.0.0.1:30001 1.1.1.1:556\n"
+        "0 0 127.0.0.1:30001 2.2.2.2:557\n"
+        "0 0 [::]:30001 [2001:db8::1]:9\n"
+        "0 0 0.0.0.0:40000 2.2.2.2:1\n"
+    )
     monkeypatch.setattr(guard, "run", lambda *args, **kwargs: output)
-    assert guard.status([30001, 40000]) == {"30001": 2, "40000": 1}
+    assert guard.status([30001, 40000]) == {"30001": 3, "40000": 1}

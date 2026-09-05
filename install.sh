@@ -38,20 +38,20 @@ service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"
 
 ensure_tools() {
   local missing=() packages=() cmd
-  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
+  for cmd in curl tar openssl nft ip; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
   ((${#missing[@]} == 0)) && return
   warn "仅安装缺失的基础工具：${missing[*]}"
   if command -v apt-get >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute2);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute2);; nft) packages+=(nftables);; *) packages+=("$cmd");; esac; done
     apt-get update && apt-get install -y ca-certificates "${packages[@]}"
   elif command -v dnf >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; nft) packages+=(nftables);; *) packages+=("$cmd");; esac; done
     dnf install -y ca-certificates "${packages[@]}"
   elif command -v yum >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; nft) packages+=(nftables);; *) packages+=("$cmd");; esac; done
     yum install -y ca-certificates "${packages[@]}"
-  else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
-  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
+  else die "请先安装 curl、tar、openssl、nftables 和 iproute2/iproute"; fi
+  for cmd in curl tar openssl nft ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
 }
 
 ensure_network_tools() {

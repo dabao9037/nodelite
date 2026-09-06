@@ -851,6 +851,7 @@ def rebuild():
                      node_id, raw_up, raw_down, origin_up, origin_down),
                 )
             conn.commit()
+        publish_netguard_snapshot()
         RUNTIME_DIRTY = False
 
 

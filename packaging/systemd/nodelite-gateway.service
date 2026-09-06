@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=20
 Description=NodeLite random-path gateway
 After=network-online.target nodelite-panel.service
 Wants=network-online.target nodelite-panel.service

@@ -1,5 +1,12 @@
 [Unit]
 Description=NodeLite Xray Core
+# Editing a device limit restarts Xray. systemd's default rate limit (5 starts
+# per 10s) would then refuse to start it at all and surface
+# "start of the service was attempted too often", which looks like a device
+# limit failure even though the config is valid. Allow more attempts and let
+# the counter drain on its own.
+StartLimitIntervalSec=60
+StartLimitBurst=20
 After=network-online.target
 Wants=network-online.target
 

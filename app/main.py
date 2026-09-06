@@ -442,8 +442,15 @@ def _run_native(command: list[str], *, failure_status: int = 500) -> str:
 
 
 def _systemctl(action: str, service: str, *, failure_status: int = 500) -> str:
-    if action not in {"is-active", "restart"} or service not in {XRAY_SERVICE, NETGUARD_SERVICE}:
+    if action not in {"is-active", "restart", "reset-failed"} or service not in {XRAY_SERVICE, NETGUARD_SERVICE}:
         raise RuntimeError("refusing non-whitelisted systemctl operation")
+    if action == "restart":
+        # Clear any accumulated start-limit counter first. Otherwise a service
+        # that failed repeatedly earlier (for example while the database was
+        # broken) makes systemd refuse to start it at all, and editing a device
+        # limit fails with "start of the service was attempted too often" even
+        # though the configuration is valid.
+        _run_native(["systemctl", "reset-failed", service], failure_status=failure_status)
     return _run_native(["systemctl", action, service], failure_status=failure_status)
 
 

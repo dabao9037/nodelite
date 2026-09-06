@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=20
 Description=NodeLite device limit guard
 After=network-online.target
 Wants=network-online.target

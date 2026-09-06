@@ -1,4 +1,6 @@
 [Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=20
 Description=NodeLite panel (loopback only)
 After=network-online.target nodelite-netguard.service
 Wants=network-online.target nodelite-netguard.service

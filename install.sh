@@ -523,6 +523,9 @@ install_or_update() {
 JSON
   fi
   install_units
+  # Clear start-limit counters left by earlier failed starts, otherwise systemd
+  # refuses to start and reports "attempted too often".
+  service_ctl reset-failed "${SERVICES[@]}" || true
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
   wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"

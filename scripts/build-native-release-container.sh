@@ -8,11 +8,11 @@ PLATFORM=""
 
 case "$ARCH" in
   amd64)
-    IMAGE="${IMAGE:-debian:11-slim}"
+    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
     PLATFORM=linux/amd64
     ;;
   arm64)
-    IMAGE="${IMAGE:-debian:11-slim}"
+    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
     PLATFORM=linux/arm64
     ;;
   *)
@@ -30,4 +30,4 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc 'apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 python3-venv python3-dev gcc binutils patchelf curl ca-certificates >/dev/null && /src/scripts/build-native-release.sh "'"$ARCH"'"'
+  bash -lc 'apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc binutils patchelf curl ca-certificates >/dev/null && /src/scripts/build-native-release.sh "'"$ARCH"'"'

@@ -61,7 +61,10 @@ services:
       DB_PATH: /data/panel.db
       NETGUARD_LOCK_PATH: /run/nodelite/netguard.lock
     volumes:
-      - ./data:/data:ro
+      # SQLite WAL readers need to create/open the shared-memory sidecar in
+      # the database directory. The netguard process still opens panel.db
+      # with mode=ro, so this writable mount is only for SQLite coordination.
+      - ./data:/data
       - netguard-run:/run/nodelite
     healthcheck:
       test: ["CMD", "python3", "/netguard.py", "health"]

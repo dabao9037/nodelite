@@ -661,7 +661,7 @@ def write_config(rows=None):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temp, 0o640)
+        os.chmod(temp, 0o644)
         temp.replace(XRAY_CONFIG_PATH)
     except BaseException:
         temp.unlink(missing_ok=True)

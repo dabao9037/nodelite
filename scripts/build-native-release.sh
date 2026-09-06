@@ -88,6 +88,7 @@ find "$PKG/source" -type f -name '*.pyc' -delete
 printf '%s\n' "$XRAY_VERSION" > "$PKG/XRAY_VERSION"
 printf '%s\n' "$ARCH" > "$PKG/ARCH"
 printf '%s\n' "${NODELITE_GLIBC_MAX:-2.31}" > "$PKG/GLIBC_MAX"
+printf '%s\n' "${NODELITE_RELEASE_TAG:-${GITHUB_REF_NAME:-dev}}" > "$PKG/VERSION"
 printf '%s\n' "${GITHUB_SHA:-local}" > "$PKG/BUILD_COMMIT"
 
 # Validate the exact package before compression.
@@ -96,6 +97,8 @@ test -x "$PKG/bin/nodelite-gateway"
 test -x "$PKG/bin/nodelite-netguard"
 test -x "$PKG/bin/xray"
 test -x "$PKG/install.sh"
+test -s "$PKG/VERSION"
+test -s "$PKG/BUILD_COMMIT"
 for unit in panel gateway xray netguard; do test -s "$PKG/systemd/nodelite-$unit.service"; done
 "$ROOT/scripts/verify-glibc-compat.sh" "$PKG" "${NODELITE_GLIBC_MAX:-2.31}"
 

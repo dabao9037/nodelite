@@ -479,7 +479,7 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         raise InstalledMismatch("nftables input chain is incomplete")
 
     expected = {node_id: (port, limit) for node_id, port, limit in desired}
-    actual_sets: dict[tuple[int, str], int] = {}
+    actual_sets: set[tuple[int, str]] = set()
     nft_sets = [item["set"] for item in items if "set" in item]
     for nft_set in nft_sets:
         parsed = _parse_set_name(str(nft_set.get("name", "")))
@@ -503,9 +503,16 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
             or _set_timeout_seconds(nft_set.get("timeout")) != DEVICE_TIMEOUT_SECONDS
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
-        actual_sets[(node_id, family)] = int(nft_set.get("size", 0))
+        # `size` is optional in libnftables JSON and some kernel/nft versions
+        # omit it or rewrite the requested limit. Inventory and rule validation
+        # below are authoritative; if size is present, only reject invalid
+        # non-positive values rather than comparing a lossy display field.
+        size = nft_set.get("size")
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size <= 0):
+            raise InstalledMismatch(f"invalid nftables set size for node {node_id}")
+        actual_sets.add((node_id, family))
     expected_sets = {
-        (node_id, family): limit
+        (node_id, family)
         for node_id, (_port_value, limit) in expected.items()
         for family in ("ipv4", "ipv6")
     }

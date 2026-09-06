@@ -26,6 +26,10 @@ for fixture in /fixture-v021 /fixture-v022; do
     chmod 0755 "$fixture/bin/$binary"
   done
 done
+printf 'v0.2.1-native\n' >/fixture-v021/VERSION
+printf '1111111111111111111111111111111111111111\n' >/fixture-v021/BUILD_COMMIT
+printf 'v0.2.2-native\n' >/fixture-v022/VERSION
+printf '2222222222222222222222222222222222222222\n' >/fixture-v022/BUILD_COMMIT
 for unit in netguard xray panel gateway; do
   printf '[Unit]\nDescription=NodeLite test service\n' >"/fixture-v021/systemd/nodelite-$unit.service"
   printf '[Unit]\nDescription=NodeLite test service\n' >"/fixture-v022/systemd/nodelite-$unit.service"
@@ -110,6 +114,7 @@ mkdir -p "$NODELITE_SYSTEMD_DIR"
 
 bash /src/install.sh install >/tmp/install-v021.log
 grep -q 'v0.2.1-native / amd64' /tmp/install-v021.log
+test "$(cat /opt/nodelite/VERSION)" = v0.2.1-native
 test -f /opt/nodelite/install.sh
 printf 'archive-v021-config-preserved\n' >/opt/nodelite/config/archive-sentinel
 printf 'preserved-before-update\n' >/opt/nodelite/data/panel.db
@@ -128,6 +133,10 @@ cd /opt/nodelite
 printf '1\n0\n' | (cd /opt/nodelite && bash install.sh menu) >/tmp/install-v022-menu.log
 ! grep -Eqi 'same file|same-file|are the same file|同一个文件' /tmp/install-v022-menu.log
 grep -q 'v0.2.2-native / amd64' /tmp/install-v022-menu.log
+grep -q '当前版本：v0.2.1-native (1111111)' /tmp/install-v022-menu.log
+test "$(cat /opt/nodelite/VERSION)" = v0.2.2-native
+test "$(cat /opt/nodelite/BUILD_COMMIT)" = 2222222222222222222222222222222222222222
+grep -q 'NodeLite 原生版安装/更新完成（v0.2.2-native (2222222) / amd64）' /tmp/install-v022-menu.log
 grep -q '^用户名：' /tmp/install-v022-menu.log
 grep -q '^密码：' /tmp/install-v022-menu.log
 grep -q '^v022$' /opt/nodelite/code-marker
@@ -140,5 +149,5 @@ test "$(cat /opt/nodelite/xray-config/archive-sentinel)" = preserved-xray-sentin
 test "$db_inode" = "$(stat -c '%d:%i' /opt/nodelite/data/panel.db)"
 test "$env_hash" = "$(sha256sum /opt/nodelite/config/nodelite.env | awk '{print $1}')"
 
-printf 'INPLACE_MENU_UPDATE_OK current_installer_path=/opt/nodelite/install.sh archive_update=yes\n'
+printf 'INPLACE_MENU_UPDATE_VERSION_CHANGED_OK old=v0.2.1-native new=v0.2.2-native menu_before=v0.2.1-native completion=v0.2.2-native\n'
 CONTAINER_TEST

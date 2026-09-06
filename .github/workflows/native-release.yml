@@ -48,6 +48,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build standalone one-dir tarball in Debian 11 (GLIBC 2.31)
+        env:
+          NODELITE_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: bash scripts/build-native-release-container.sh "${{ matrix.arch }}"
       - name: Verify release GLIBC compatibility
         run: bash scripts/verify-glibc-compat.sh "dist/nodelite-linux-${{ matrix.arch }}.tar.gz" 2.31
@@ -89,7 +91,10 @@ jobs:
             test "$expected" = "$actual"
             mkdir "$arch"
             tar -C "$arch" -xzf "nodelite-linux-$arch.tar.gz"
+            test "$(cat "$arch/VERSION")" = "$RELEASE_TAG"
             test "$(cat "$arch/BUILD_COMMIT")" = "$GITHUB_SHA"
+            grep -q 'installed_version' "$arch/install.sh"
+            grep -q '当前版本：%s' "$arch/install.sh"
             guard="$arch/source/netguard/netguard.py"
             test -f "$guard"
             # Single-family sets: names are built from SET_PREFIX plus a v4/v6

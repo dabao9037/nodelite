@@ -261,6 +261,18 @@ download_native_asset() {
 }
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
 
+installed_version() {
+  local version commit
+  version="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)"
+  commit="$(cat "$INSTALL_DIR/BUILD_COMMIT" 2>/dev/null || true)"
+  [[ -n "$version" ]] || version="未知"
+  if [[ "$commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s (%s)' "$version" "${commit:0:7}"
+  else
+    printf '%s' "$version"
+  fi
+}
+
 save_installer() {
   local destination="$1" source="${BASH_SOURCE[0]:-}"
   mkdir -p "$(dirname "$destination")"
@@ -556,6 +568,7 @@ install_or_update() {
   mkdir -p "$release_dir"
   tar -xzf "$tmp/release.tar.gz" -C "$release_dir"
   validate_release_compatibility "$release_dir" "$arch"
+  [[ "$(cat "$release_dir/VERSION" 2>/dev/null || true)" == "$tag" ]] || die "发行包版本与 Release 不匹配：需要 $tag"
   backup_runtime_state "$backup_dir"
   stop_legacy_docker
   stop_native_for_upgrade
@@ -579,7 +592,8 @@ JSON
   # refuses to start and reports "attempted too often".
   service_ctl reset-failed "${SERVICES[@]}" || true
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
-  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
+  [[ "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)" == "$tag" ]] || die "安装后版本校验失败：需要 $tag，实际 $(installed_version)"
+  wait_healthy; ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
@@ -626,7 +640,7 @@ uninstall_nodelite() {
 }
 
 menu() {
-  while true; do cat <<'EOF'
+  while true; do printf '\n当前版本：%s\n' "$(installed_version)"; cat <<'EOF'
 
 ============== NodeLite 原生管理菜单 ==============
   1. 安装 / 更新（默认原生 systemd）

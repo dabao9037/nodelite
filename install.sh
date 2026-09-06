@@ -214,6 +214,35 @@ latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
   curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
+
+download_native_asset() {
+  local tag="$1" arch="$2" destination="$3"
+  local asset="nodelite-linux-$arch.tar.gz"
+  local base_url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/$asset}"
+  local attempt delay cache_bust url
+
+  # GitHub may publish the Release object before every CDN edge can serve its
+  # newly-attached asset. A user's first menu-1 update must therefore tolerate
+  # transient 404/5xx responses instead of exiting after one request.
+  for attempt in 1 2 3 4 5 6; do
+    cache_bust="nodelite=$(date +%s)-$attempt-$RANDOM"
+    url="$base_url"
+    [[ "$url" == *\?* ]] && url="$url&$cache_bust" || url="$url?$cache_bust"
+    if curl -fL \
+      --connect-timeout 15 --max-time 600 \
+      --retry 3 --retry-all-errors --retry-delay 2 \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$url" -o "$destination"; then
+      [[ -s "$destination" ]] || die "下载到的原生发行包为空"
+      return 0
+    fi
+    rm -f "$destination"
+    delay=$((attempt * 5))
+    warn "发行包暂时不可用，${delay} 秒后重试（$attempt/6）"
+    sleep "$delay"
+  done
+  die "原生发行包连续重试后仍无法下载：$base_url"
+}
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
 
 save_installer() {
@@ -505,7 +534,8 @@ install_or_update() {
   secret="${!SECRET_KEY:-$(read_key "$old" "$SECRET_KEY")}"; secret="${secret:-$(random_secret)}"
   old_internal="$(read_key "$old" PANEL_INTERNAL_PORT)"
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
-  info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
+  info "下载原生发行包：$url"
+  download_native_asset "$tag" "$arch" "$tmp/release.tar.gz"
   release_dir="$tmp/release"; backup_dir="$tmp/runtime-state"
   mkdir -p "$release_dir"
   tar -xzf "$tmp/release.tar.gz" -C "$release_dir"

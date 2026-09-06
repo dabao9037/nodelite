@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Administrative tools such as nft, ip and sysctl live in sbin. A root shell
+# started without a login profile (su, cron, some CI/agents) may omit those
+# directories, which previously aborted installation with "依赖安装后仍找不到命令：nft"
+# even though nftables was installed.
+for _dir in /usr/local/sbin /usr/sbin /sbin; do
+  case ":$PATH:" in *":$_dir:"*) ;; *) [[ -d "$_dir" ]] && PATH="$PATH:$_dir" ;; esac
+done
+unset _dir
+export PATH
+
 REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"

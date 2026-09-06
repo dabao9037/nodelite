@@ -441,6 +441,29 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     return all(token in expression for token in required)
 
 
+def _set_timeout_seconds(value) -> int | None:
+    """Normalize nft JSON set timeout, which nftables reports in milliseconds.
+
+    Text rules use duration suffixes such as ``15s`` but libnftables' JSON
+    schema serializes timeout values as integer milliseconds. Keep accepting a
+    duration string for compatibility with synthetic/older captured fixtures.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value // 1000 if value >= 1000 and value % 1000 == 0 else value
+    if not isinstance(value, str):
+        return None
+    matched = re.fullmatch(r"(\d+)(ms|s)?", value.strip())
+    if not matched:
+        return None
+    amount = int(matched.group(1))
+    unit = matched.group(2)
+    if unit == "ms":
+        return amount // 1000 if amount % 1000 == 0 else None
+    return amount
+
+
 def validate_installed(desired: list[tuple[int, int, int]]) -> None:
     """Require the installed table to match desired nodes, limits and rules."""
     items = _nft_json()
@@ -473,7 +496,11 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
             or nft_set.get("table") != TABLE
             or nft_set.get("type") not in (expected_type, [expected_type])
             or flags != {"dynamic", "timeout"}
-            or int(nft_set.get("timeout", 0)) != DEVICE_TIMEOUT_SECONDS
+            # libnftables' JSON schema serializes durations in milliseconds.
+            # The ruleset text uses `timeout 15s`, but `nft -j list` reports
+            # that value as 15000. Comparing it directly with 15 made every
+            # freshly-created set fail validation on nftables 1.0.x.
+            or _set_timeout_seconds(nft_set.get("timeout", 0)) != DEVICE_TIMEOUT_SECONDS * 1000
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
         actual_sets[(node_id, family)] = int(nft_set.get("size", 0))

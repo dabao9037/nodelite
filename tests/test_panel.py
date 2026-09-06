@@ -1112,7 +1112,7 @@ def nft_json_for(guard, desired, elements=None):
                 nft_set["elem"] = [{"elem": {"val": value}} for value in family_elements]
             items.append({"set": nft_set})
             for role in guard.RULE_ROLES:
-                items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, family, role), "expr": _nft_expr(family, node_id, role, port)}})
+                items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, role), "expr": _nft_expr(family, node_id, role, port)}})
     return items
 
 
@@ -1207,10 +1207,10 @@ def test_netguard_health_precisely_checks_sets_rules_size_and_port(tmp_path, mon
     cases = []
     wrong_size = json.loads(json.dumps(current)); next(x["set"] for x in wrong_size if "set" in x)["size"] = 99; cases.append(wrong_size)
     wrong_timeout = json.loads(json.dumps(current)); next(x["set"] for x in wrong_timeout if "set" in x)["timeout"] = 99; cases.append(wrong_timeout)
-    wrong_family = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_family if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4", "add"))["expr"][1]["match"]["right"] = "ipv6"; cases.append(wrong_family)
+    wrong_family = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_family if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"][1]["match"]["right"] = "ipv6"; cases.append(wrong_family)
     wrong_port = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_port if "rule" in x)["expr"][0]["match"]["right"] = 30002; cases.append(wrong_port)
     missing_rule = json.loads(json.dumps(current)); missing_rule.pop(next(i for i,x in enumerate(missing_rule) if "rule" in x)); cases.append(missing_rule)
-    ct_new_add = json.loads(json.dumps(current)); next(x["rule"] for x in ct_new_add if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4", "add"))["expr"] = _nft_expr("ipv4", 1, "ipv4-add", 30001, ct_new=True); cases.append(ct_new_add)
+    ct_new_add = json.loads(json.dumps(current)); next(x["rule"] for x in ct_new_add if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"] = _nft_expr("ipv4", 1, "ipv4-add", 30001, ct_new=True); cases.append(ct_new_add)
     extra_set = json.loads(json.dumps(current)); extra_set.append({"set": {"family": "inet", "table": "nodelite_netguard", "name": "other", "type": "ipv4_addr"}}); cases.append(extra_set)
     for malformed in cases:
         monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)

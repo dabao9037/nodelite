@@ -2,8 +2,10 @@
 """Fail-safe source-IP device-limit enforcement for NodeLite.
 
 A device is approximated by a distinct public source IP. Each limited node owns
-one bounded nftables dynamic set shared by IPv4 and IPv6. Admitted addresses are
-kept in the kernel and are not rebuilt during normal reconciliation.
+one bounded nftables dynamic set per address family. Admitted addresses are
+kept in the kernel and are not rebuilt during normal reconciliation. Separate
+sets avoid mixed-family concat constants that older nftables releases cannot
+parse.
 """
 from __future__ import annotations
 
@@ -149,13 +151,21 @@ def established_sources(ports: list[int]) -> dict[int, set[str]]:
     return sources
 
 
-def _set_name(node_id: int) -> str:
-    return f"{SET_PREFIX}{node_id}"
+def _set_name(node_id: int, family: str) -> str:
+    suffix = {"ipv4": "v4", "ipv6": "v6"}.get(family)
+    if suffix is None:
+        raise ValueError("invalid address family")
+    return f"{SET_PREFIX}{node_id}_{suffix}"
 
 
-def _nft_key(address: str) -> str:
-    parsed = ipaddress.ip_address(address)
-    return f"{parsed} . ::" if parsed.version == 4 else f"0.0.0.0 . {parsed}"
+def _parse_set_name(name: str) -> tuple[int, str | None] | None:
+    """Return (node id, family); family=None identifies the legacy concat set."""
+    match = re.fullmatch(rf"{re.escape(SET_PREFIX)}(\d+)(?:_(v4|v6))?", name)
+    if not match:
+        return None
+    node_id = int(match.group(1))
+    suffix = match.group(2)
+    return node_id, {"v4": "ipv4", "v6": "ipv6"}.get(suffix)
 
 
 def _rule_comment(node_id: int, role: str) -> str:
@@ -179,10 +189,15 @@ def render_ruleset(
     for node_id, port, limit in desired:
         if node_id < 1 or not 1 <= port <= 65535 or limit < 1:
             raise ValueError("invalid device-limit rule")
-        name = _set_name(node_id)
+        names = {family: _set_name(node_id, family) for family in ("ipv4", "ipv6")}
         lines.append(
-            f"add set {TABLE_FAMILY} {TABLE} {name} "
-            f"{{ type ipv4_addr . ipv6_addr; flags dynamic,timeout; "
+            f"add set {TABLE_FAMILY} {TABLE} {names['ipv4']} "
+            f"{{ type ipv4_addr; flags dynamic,timeout; "
+            f"timeout {timeout_seconds}s; size {limit}; }}"
+        )
+        lines.append(
+            f"add set {TABLE_FAMILY} {TABLE} {names['ipv6']} "
+            f"{{ type ipv6_addr; flags dynamic,timeout; "
             f"timeout {timeout_seconds}s; size {limit}; }}"
         )
         raw_addresses = sources.get(port, set())
@@ -193,12 +208,15 @@ def render_ruleset(
                 raw_addresses,
                 key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value))),
             )
-        if addresses:
-            elements = ", ".join(
-                f"{_nft_key(address)} timeout {timeout_seconds}s" for address in addresses[:limit]
-            )
-            lines.append(f"add element {TABLE_FAMILY} {TABLE} {name} {{ {elements} }}")
-        for family, key in (("ipv4", "ip saddr . ::"), ("ipv6", "0.0.0.0 . ip6 saddr")):
+        for family, version in (("ipv4", 4), ("ipv6", 6)):
+            family_addresses = [address for address in addresses if ipaddress.ip_address(address).version == version]
+            if family_addresses:
+                elements = ", ".join(
+                    f"{address} timeout {timeout_seconds}s" for address in family_addresses[:limit]
+                )
+                lines.append(f"add element {TABLE_FAMILY} {TABLE} {names[family]} {{ {elements} }}")
+            key = "ip saddr" if family == "ipv4" else "ip6 saddr"
+            name = names[family]
             prefix = f"add rule {TABLE_FAMILY} {TABLE} {CHAIN} tcp dport {port} meta nfproto {family}"
             lines.append(
                 f'{prefix} {key} @{name} update @{name} {{ {key} timeout {timeout_seconds}s }} '
@@ -285,6 +303,23 @@ def _concat_address(value) -> str | None:
     return None
 
 
+def _element_address(value, family: str | None) -> str | None:
+    """Decode current single-family elements and legacy concat elements."""
+    if family is None:
+        return _concat_address(value)
+    candidate = value
+    if isinstance(candidate, dict):
+        candidate = candidate.get("prefix", candidate.get("val", candidate))
+    if not isinstance(candidate, str):
+        return None
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    expected_version = 4 if family == "ipv4" else 6
+    return str(address) if address.version == expected_version else None
+
+
 def installed_sources(desired: list[tuple[int, int, int]]) -> dict[int, set[str]]:
     """Read admitted kernel-set members so config changes do not evict them."""
     by_node = {node_id: port for node_id, port, _ in desired}
@@ -292,18 +327,19 @@ def installed_sources(desired: list[tuple[int, int, int]]) -> dict[int, set[str]
     items = _nft_json()
     for item in items:
         nft_set = item.get("set")
-        if not nft_set or not str(nft_set.get("name", "")).startswith(SET_PREFIX):
+        if not nft_set:
             continue
-        try:
-            node_id = int(nft_set["name"][len(SET_PREFIX):])
-        except ValueError:
+        parsed = _parse_set_name(str(nft_set.get("name", "")))
+        if not parsed:
             continue
+        node_id, family = parsed
         port = by_node.get(node_id)
         if port is None:
             continue
         for element in nft_set.get("elem", []):
-            payload = element.get("elem", element) if isinstance(element, dict) else {}
-            address = _concat_address(payload.get("val")) if isinstance(payload, dict) else None
+            payload = element.get("elem", element) if isinstance(element, dict) else element
+            value = payload.get("val") if isinstance(payload, dict) else payload
+            address = _element_address(value, family)
             if address:
                 sources[port].add(address)
     return sources
@@ -335,7 +371,7 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
         return False
     # nft JSON represents set names either as devices_N or @devices_N,
     # depending on whether it came from libnftables JSON input or parsed CLI.
-    if action != "reject" and _set_name(node_id) not in expression:
+    if action != "reject" and _set_name(node_id, family) not in expression:
         return False
     # Admission, membership and rejection must apply to every packet.  In
     # particular, an already-established flow can resume after its source's
@@ -353,7 +389,10 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
         "accept": ('"return"',),
         "reject": ('"reject"',),
     }[action]
-    if action == "accept" and not ('"lookup"' in expression or '"right":"@' + _set_name(node_id) + '"' in expression):
+    if action == "accept" and not (
+        '"lookup"' in expression
+        or '"right":"@' + _set_name(node_id, family) + '"' in expression
+    ):
         return False
     return all(token in expression for token in required)
 
@@ -372,27 +411,36 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         raise InstalledMismatch("nftables input chain is incomplete")
 
     expected = {node_id: (port, limit) for node_id, port, limit in desired}
-    actual_sets: dict[int, int] = {}
+    actual_sets: dict[tuple[int, str], int] = {}
     nft_sets = [item["set"] for item in items if "set" in item]
     for nft_set in nft_sets:
-        if not str(nft_set.get("name", "")).startswith(SET_PREFIX):
+        parsed = _parse_set_name(str(nft_set.get("name", "")))
+        if not parsed:
             raise InstalledMismatch("unexpected nftables set")
-        try:
-            node_id = int(nft_set["name"][len(SET_PREFIX):])
-        except ValueError as exc:
-            raise InstalledMismatch("unexpected nftables device set") from exc
+        node_id, family = parsed
+        # Legacy mixed-family concat sets are retained long enough to recover
+        # their admitted members, but always trigger replacement.
+        if family is None:
+            raise InstalledMismatch("legacy nftables device set requires migration")
         flags = set(nft_set.get("flags", []))
+        expected_type = "ipv4_addr" if family == "ipv4" else "ipv6_addr"
         if (
             nft_set.get("family") != TABLE_FAMILY
             or nft_set.get("table") != TABLE
-            or nft_set.get("type") != ["ipv4_addr", "ipv6_addr"]
+            or nft_set.get("type") not in (expected_type, [expected_type])
             or flags != {"dynamic", "timeout"}
             or int(nft_set.get("timeout", 0)) != DEVICE_TIMEOUT_SECONDS
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
-        actual_sets[node_id] = int(nft_set.get("size", 0))
-    if actual_sets != {node_id: limit for node_id, (_port_value, limit) in expected.items()}:
+        actual_sets[(node_id, family)] = int(nft_set.get("size", 0))
+    expected_sets = {
+        (node_id, family): limit
+        for node_id, (_port_value, limit) in expected.items()
+        for family in ("ipv4", "ipv6")
+    }
+    if actual_sets != expected_sets:
         raise InstalledMismatch("nftables device sets do not match desired limits")
+
 
     actual_rules: dict[str, int] = {}
     for item in items:

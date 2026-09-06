@@ -170,7 +170,7 @@ finally: s.close()
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     time.sleep(TIMEOUT + 1.5)
-    snapshot_before_b = run("nft", "list", "set", "inet", "nodelite_netguard", "devices_1").stdout
+    snapshot_before_b = run("nft", "list", "set", "inet", "nodelite_netguard", "devices_1_v4").stdout
     if "10.77.0.2" in snapshot_before_b:
         raise AssertionError(f"source A did not expire from dynamic set: {snapshot_before_b}")
     # Use a new namespace/address for the post-timeout occupant. This proves a
@@ -219,7 +219,7 @@ except Exception:
         raise AssertionError("source B did not occupy the released slot")
     if any(e.get("data") == "A-after-timeout" for e in events):
         raise AssertionError("server received resumed data from expired source A")
-    members = run("nft", "-j", "list", "set", "inet", "nodelite_netguard", "devices_1").stdout
+    members = run("nft", "-j", "list", "set", "inet", "nodelite_netguard", "devices_1_v4").stdout
     print(json.dumps({
         "initial_a": "admitted_and_echoed",
         "initial_b": b_probe.stdout.strip(),

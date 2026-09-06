@@ -1428,6 +1428,28 @@ def test_netguard_validates_real_nft_output_and_stays_idempotent(tmp_path, monke
     assert guard.health() == {"status": "ok"}
 
 
+@pytest.mark.parametrize("timeout", [15000, 15, "15s", "15000ms"])
+def test_netguard_normalizes_compatible_set_timeout_formats(tmp_path, monkeypatch, timeout):
+    """Accept real nftables 1.0.9 milliseconds and compatible fixtures."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    for item in installed:
+        if "set" in item:
+            item["set"]["timeout"] = timeout
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])
+
+
+@pytest.mark.parametrize("timeout", [True, None, 0, 15001, "15ms", "1m", "garbage"])
+def test_netguard_rejects_invalid_set_timeout_formats(tmp_path, monkeypatch, timeout):
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    next(item["set"] for item in installed if "set" in item)["timeout"] = timeout
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    with pytest.raises(guard.InstalledMismatch, match="invalid nftables set"):
+        guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])
+
+
 def test_netguard_rejects_wrong_family_and_reordered_real_rules(tmp_path, monkeypatch):
     """A relabelled, cross-family or reordered rule must never validate."""
     guard = load_netguard(tmp_path, monkeypatch)

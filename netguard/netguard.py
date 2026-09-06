@@ -442,11 +442,12 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
 
 
 def _set_timeout_seconds(value) -> int | None:
-    """Normalize nft JSON set timeout, which nftables reports in milliseconds.
+    """Normalize nft JSON set timeout to whole seconds.
 
-    Text rules use duration suffixes such as ``15s`` but libnftables' JSON
-    schema serializes timeout values as integer milliseconds. Keep accepting a
-    duration string for compatibility with synthetic/older captured fixtures.
+    nftables 1.0.9 reports JSON numeric durations in milliseconds (for
+    example, ``15000`` for a 15-second set timeout). Synthetic and older test
+    fixtures have also represented the same duration as ``15``, ``"15s"``,
+    or ``"15000ms"``. Accept those unambiguous whole-second forms only.
     """
     if isinstance(value, bool):
         return None
@@ -496,11 +497,10 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
             or nft_set.get("table") != TABLE
             or nft_set.get("type") not in (expected_type, [expected_type])
             or flags != {"dynamic", "timeout"}
-            # libnftables' JSON schema serializes durations in milliseconds.
-            # The ruleset text uses `timeout 15s`, but `nft -j list` reports
-            # that value as 15000. Comparing it directly with 15 made every
-            # freshly-created set fail validation on nftables 1.0.x.
-            or _set_timeout_seconds(nft_set.get("timeout", 0)) != DEVICE_TIMEOUT_SECONDS * 1000
+            # Compare normalized seconds: nftables 1.0.9 emits numeric JSON
+            # durations in milliseconds, while compatible fixtures may use
+            # seconds or an explicit duration suffix.
+            or _set_timeout_seconds(nft_set.get("timeout")) != DEVICE_TIMEOUT_SECONDS
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
         actual_sets[(node_id, family)] = int(nft_set.get("size", 0))

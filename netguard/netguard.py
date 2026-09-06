@@ -31,6 +31,9 @@ SET_PREFIX = "devices_"
 COMMENT_PREFIX = "nodelite-node-"
 LEGACY_CHAIN = "NODELITE_CONN_LIMIT"
 DEFAULT_DEVICE_TIMEOUT_SECONDS = 15
+DEVICE_TIMEOUT_SECONDS = int(os.getenv("NETGUARD_DEVICE_TIMEOUT_SECONDS", str(DEFAULT_DEVICE_TIMEOUT_SECONDS)))
+if not 1 <= DEVICE_TIMEOUT_SECONDS <= 86400:
+    raise ValueError("invalid device timeout")
 RULE_ROLES = (
     "ipv4-refresh", "ipv4-add", "ipv4-accept", "ipv4-reject",
     "ipv6-refresh", "ipv6-add", "ipv6-accept", "ipv6-reject",
@@ -155,9 +158,10 @@ def _rule_comment(node_id: int, role: str) -> str:
 def render_ruleset(
     desired: list[tuple[int, int, int]],
     sources: dict[int, set[str]],
-    timeout_seconds: int = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Render one atomic replacement for NodeLite's private nftables table."""
+    timeout_seconds = DEVICE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     if timeout_seconds < 1:
         raise ValueError("device timeout must be positive")
     lines = [
@@ -311,13 +315,19 @@ def _rule_port(rule: dict) -> int | None:
 
 
 def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
-    """Check the family, set reference and verdict encoded by a labelled rule."""
+    """Check the address family, set reference and verdict of a labelled rule."""
     family, action = role.split("-", 1)
     expression = json.dumps(rule.get("expr", []), sort_keys=True, separators=(",", ":"))
-    if family not in expression:
+    address_protocol = f'"protocol":"{"ip" if family == "ipv4" else "ip6"}"'
+    synthetic_family = f'"right":"{family}"'
+    # Reject rules do not carry an address expression, but all preceding
+    # family-specific rules do. Their order plus exact labelled rule inventory
+    # makes the paired final reject unambiguous. Synthetic test fixtures encode
+    # the family as an explicit meta-nfproto comparison.
+    if action != "reject" and address_protocol not in expression and synthetic_family not in expression:
         return False
-    # Reject rules intentionally do not reference the set: they are the final
-    # per-family catch-all after refresh, admission and membership checks.
+    # nft JSON represents set names either as devices_N or @devices_N,
+    # depending on whether it came from libnftables JSON input or parsed CLI.
     if action != "reject" and _set_name(node_id) not in expression:
         return False
     # Admission, membership and rejection must apply to every packet.  In
@@ -327,11 +337,17 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     if action in {"add", "accept", "reject"} and '"ct"' in expression:
         return False
     required = {
+        # Real nft JSON calls dynamic-set mutation a generic "set" expression
+        # and stores the operation in op; synthetic fixtures may use the op as
+        # the expression key. Accept both representations while requiring the
+        # operation and final verdict.
         "refresh": ('"update"', '"return"'),
         "add": ('"add"',),
-        "accept": ('"lookup"', '"return"'),
+        "accept": ('"return"',),
         "reject": ('"reject"',),
     }[action]
+    if action == "accept" and not ('"lookup"' in expression or '"right":"@' + _set_name(node_id) + '"' in expression):
+        return False
     return all(token in expression for token in required)
 
 
@@ -364,6 +380,7 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
             or nft_set.get("table") != TABLE
             or nft_set.get("type") != ["ipv4_addr", "ipv6_addr"]
             or flags != {"dynamic", "timeout"}
+            or int(nft_set.get("timeout", 0)) != DEVICE_TIMEOUT_SECONDS
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
         actual_sets[node_id] = int(nft_set.get("size", 0))

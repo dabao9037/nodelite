@@ -18,8 +18,6 @@ PrivateTmp=true
 ProtectSystem=strict
 StateDirectory=nodelite
 ReadWritePaths=/var/lib/nodelite
-RuntimeDirectory=nodelite
-RuntimeDirectoryMode=0770
 ReadWritePaths=/opt/nodelite/data /opt/nodelite/xray-config
 ReadWritePaths=/run/nodelite
 

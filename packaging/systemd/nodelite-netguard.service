@@ -22,6 +22,7 @@ ProtectSystem=strict
 StateDirectory=nodelite
 RuntimeDirectory=nodelite
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/run/nodelite
 ReadOnlyPaths=/var/lib/nodelite
 InaccessiblePaths=/opt/nodelite/data

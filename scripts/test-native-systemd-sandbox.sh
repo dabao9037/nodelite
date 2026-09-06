@@ -28,12 +28,14 @@ PANEL="$fixture/nodelite-panel.service"
 GUARD="$fixture/nodelite-netguard.service"
 
 # Both processes use the exact same flock inode in a shared writable runtime
-# directory. The panel receives no broader write access outside its data,
-# xray config, runtime lock, and snapshot state directories.
-grep -qx 'RuntimeDirectory=nodelite' "$PANEL"
+# directory. Netguard is the sole owner: if the panel also declared the same
+# RuntimeDirectory, restarting the panel would detach netguard onto the old
+# read-only mount and every later reconcile would fail with EROFS. Preserve
+# the owner directory across netguard restarts for the same reason.
+! grep -q '^RuntimeDirectory=' "$PANEL"
 grep -qx 'RuntimeDirectory=nodelite' "$GUARD"
-grep -qx 'RuntimeDirectoryMode=0770' "$PANEL"
 grep -qx 'RuntimeDirectoryMode=0770' "$GUARD"
+grep -qx 'RuntimeDirectoryPreserve=yes' "$GUARD"
 grep -qx 'ReadWritePaths=/run/nodelite' "$PANEL"
 grep -qx 'ReadWritePaths=/run/nodelite' "$GUARD"
 ! grep -Eq '^ReadWritePaths=.*(/opt/nodelite($|[[:space:]])|/opt/nodelite/data)' "$GUARD"

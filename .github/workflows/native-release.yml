@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build standalone one-dir tarball in Debian 11 (GLIBC 2.31)
         env:
-          NODELITE_RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          NODELITE_RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
         run: bash scripts/build-native-release-container.sh "${{ matrix.arch }}"
       - name: Verify release GLIBC compatibility
         run: bash scripts/verify-glibc-compat.sh "dist/nodelite-linux-${{ matrix.arch }}.tar.gz" 2.31

@@ -1081,11 +1081,13 @@ def test_netguard_health_fails_when_nft_probe_fails(tmp_path, monkeypatch):
         guard.health()
 
 
-def _nft_expr(family, node_id, role, port):
+def _nft_expr(family, node_id, role, port, ct_new=False):
     expressions = [
         {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": port}},
         {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": family}},
     ]
+    if ct_new:
+        expressions.append({"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "new"}})
     action = role.split("-", 1)[1]
     if action == "refresh":
         expressions += [{"update": {"op": {"concat": []}, "set": f"devices_{node_id}"}}, {"return": None}]
@@ -1130,7 +1132,7 @@ def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_explicit_roll
     # An ESTABLISHED flow that was idle past the timeout must be admitted again
     # or rejected; it must never bypass through policy accept.
     for line in script.splitlines():
-        if "-add"" in line or "-accept"" in line or "-reject"" in line:
+        if '-add"' in line or '-accept"' in line or '-reject"' in line:
             assert "ct state new" not in line
 
     calls = []
@@ -1203,6 +1205,7 @@ def test_netguard_health_precisely_checks_sets_rules_size_and_port(tmp_path, mon
     wrong_size = json.loads(json.dumps(current)); next(x["set"] for x in wrong_size if "set" in x)["size"] = 99; cases.append(wrong_size)
     wrong_port = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_port if "rule" in x)["expr"][0]["match"]["right"] = 30002; cases.append(wrong_port)
     missing_rule = json.loads(json.dumps(current)); missing_rule.pop(next(i for i,x in enumerate(missing_rule) if "rule" in x)); cases.append(missing_rule)
+    ct_new_add = json.loads(json.dumps(current)); next(x["rule"] for x in ct_new_add if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"] = _nft_expr("ipv4", 1, "ipv4-add", 30001, ct_new=True); cases.append(ct_new_add)
     extra_set = json.loads(json.dumps(current)); extra_set.append({"set": {"family": "inet", "table": "nodelite_netguard", "name": "other", "type": "ipv4_addr"}}); cases.append(extra_set)
     for malformed in cases:
         monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)

@@ -45,14 +45,6 @@ class InstalledMismatch(RuntimeError):
     """The installed private table does not match the desired configuration."""
 
 
-class TableMissing(RuntimeError):
-    """The private nftables table has not been installed yet."""
-
-
-class InstalledMismatch(RuntimeError):
-    """The installed private table does not match the desired configuration."""
-
-
 def run(*args: str, check: bool = True) -> str:
     result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and result.returncode:
@@ -315,6 +307,12 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     family, action = role.split("-", 1)
     expression = json.dumps(rule.get("expr", []), sort_keys=True, separators=(",", ":"))
     if family not in expression or _set_name(node_id) not in expression:
+        return False
+    # Admission, membership and rejection must apply to every packet.  In
+    # particular, an already-established flow can resume after its source's
+    # dynamic-set timeout; accepting only ct NEW here would let it fall through
+    # the chain's accept policy when capacity is occupied by another source.
+    if action in {"add", "accept", "reject"} and '"ct"' in expression:
         return False
     required = {
         "refresh": ('"update"', '"return"'),

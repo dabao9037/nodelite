@@ -92,10 +92,14 @@ jobs:
             test "$(cat "$arch/BUILD_COMMIT")" = "$GITHUB_SHA"
             guard="$arch/source/netguard/netguard.py"
             test -f "$guard"
-            grep -q 'devices_.*_v4' "$guard"
-            grep -q 'devices_.*_v6' "$guard"
+            # Single-family sets: names are built from SET_PREFIX plus a v4/v6
+            # suffix, so assert the construction rather than a literal name.
+            grep -q 'SET_PREFIX = "devices_"' "$guard"
+            grep -q '"ipv4": "v4", "ipv6": "v6"' "$guard"
+            grep -q 'type ipv4_addr' "$guard"
+            grep -q 'type ipv6_addr' "$guard"
             # The v0.3.9 device-limit fix: full <family>-<action> role parsing,
-            # cross-family rejection and per-node (not per-family) limits.
+            # cross-family rejection, rule order and per-node (not per-family) limits.
             grep -q 'matched.group(2)}-{matched.group(3)' "$guard"
             grep -q '_other_family' "$guard"
             grep -q 'installed_order != expected_order' "$guard"

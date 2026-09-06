@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 RuntimeDirectory=nodelite
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0770
 ReadWritePaths=/run/nodelite
 ReadOnlyPaths=/opt/nodelite/data
 

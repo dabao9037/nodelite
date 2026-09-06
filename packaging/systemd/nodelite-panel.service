@@ -14,7 +14,10 @@ RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+RuntimeDirectory=nodelite
+RuntimeDirectoryMode=0770
 ReadWritePaths=/opt/nodelite/data /opt/nodelite/xray-config
+ReadWritePaths=/run/nodelite
 
 [Install]
 WantedBy=multi-user.target

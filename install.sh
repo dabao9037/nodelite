@@ -333,6 +333,8 @@ write_environment() {
 RUNTIME_BACKEND=native
 NODELITE_HOME=$INSTALL_DIR
 DB_PATH=$INSTALL_DIR/data/panel.db
+NETGUARD_DB_PATH=/var/lib/nodelite/netguard.db
+NETGUARD_DB_IMMUTABLE=1
 XRAY_CONFIG_PATH=$INSTALL_DIR/xray-config/config.json
 PUBLIC_HOST=$host
 ADMIN_USER=$user
@@ -351,6 +353,16 @@ EOF
   chmod 600 "$INSTALL_DIR/config/nodelite.env"
 }
 
+repair_native_permissions() {
+  mkdir -p "$INSTALL_DIR/data" /var/lib/nodelite /run/nodelite
+  chown root:root "$INSTALL_DIR/data" /var/lib/nodelite /run/nodelite
+  chmod 0700 "$INSTALL_DIR/data"
+  chmod 0750 /var/lib/nodelite
+  chmod 0770 /run/nodelite
+  set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_PATH /var/lib/nodelite/netguard.db
+  set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_IMMUTABLE 1
+}
+
 install_units() {
   mkdir -p "$SYSTEMD_DIR"
   local unit installed temporary
@@ -364,6 +376,7 @@ install_units() {
     install -m 0644 "$temporary" "$installed"
     rm -f "$temporary"
   done
+  repair_native_permissions
   service_ctl daemon-reload
   service_ctl enable "${SERVICES[@]}"
 }

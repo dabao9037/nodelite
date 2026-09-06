@@ -23,6 +23,8 @@ jobs:
         run: |
           bash -n install.sh install-docker.sh scripts/*.sh
           bash scripts/test-native-smoke.sh
+          bash scripts/test-native-systemd-sandbox.sh
+          python scripts/test-native-db-snapshot.py
       - name: Verify REALITY source preset list
         run: python scripts/verify_native_release.py .
       - name: Verify release configuration

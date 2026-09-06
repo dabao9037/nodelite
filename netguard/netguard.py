@@ -22,7 +22,8 @@ import sys
 import tempfile
 import time
 
-DB_PATH = os.getenv("DB_PATH", "/data/panel.db")
+DB_PATH = os.getenv("NETGUARD_DB_PATH", os.getenv("DB_PATH", "/data/panel.db"))
+DB_IMMUTABLE = os.getenv("NETGUARD_DB_IMMUTABLE", "0") == "1"
 LOCK_PATH = os.getenv("NETGUARD_LOCK_PATH", "/run/nodelite/netguard.lock")
 TABLE_FAMILY = "inet"
 TABLE = "nodelite_netguard"
@@ -79,6 +80,12 @@ def desired_rules(now: int | None = None) -> list[tuple[int, int, int]]:
     if not os.path.exists(DB_PATH):
         return []
     uri = f"file:{os.path.abspath(DB_PATH)}?mode=ro"
+    if DB_IMMUTABLE:
+        # Native installs publish a closed, atomically replaced SQLite backup.
+        # immutable avoids creating journal/WAL sidecars in netguard's
+        # read-only sandbox; it is safe only for that snapshot, never the live
+        # panel database.
+        uri += "&immutable=1"
     connection = sqlite3.connect(uri, uri=True, timeout=2)
     try:
         connection.execute("PRAGMA query_only=ON")

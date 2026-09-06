@@ -26,6 +26,8 @@ jobs:
       - name: Run native smoke and unit tests
         run: |
           bash scripts/test-native-smoke.sh
+          bash scripts/test-native-systemd-sandbox.sh
+          python scripts/test-native-db-snapshot.py
           PYTHONPATH=. pytest -q
 
   build:

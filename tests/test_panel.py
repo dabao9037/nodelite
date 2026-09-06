@@ -2,6 +2,7 @@ import base64
 import importlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -150,6 +151,138 @@ def test_restart_preserves_manual_reason_even_when_node_is_over_quota(tmp_path, 
     assert connection.execute(
         "SELECT enabled,disabled_reason FROM nodes WHERE port=21014"
     ).fetchone() == (0, "manual")
+    connection.close()
+
+
+STUB_NODES_TABLE = (
+    "CREATE TABLE IF NOT EXISTS nodes (id INTEGER, port INTEGER, max_devices INTEGER, "
+    "enabled INTEGER, expires_at INTEGER)"
+)
+
+
+def _panel_module(db, monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_USER", "test-admin")
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "correct-horse")
+    monkeypatch.setenv("APP_" + "SECRET", "test-signing-value")
+    monkeypatch.setenv("PUBLIC_HOST", "node.example.test")
+    monkeypatch.setenv("RUNTIME_BACKEND", "docker")
+    monkeypatch.setenv("DB_PATH", str(db))
+    monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    monkeypatch.setenv("BACKGROUND_INTERVAL_SECONDS", "3600")
+    monkeypatch.setenv("REALITY_TARGETS_URL", "")
+    monkeypatch.setenv("REALITY_TARGETS_CACHE", str(tmp_path / "reality-targets-cache.json"))
+    monkeypatch.setenv(
+        "REALITY_TARGETS_BUNDLED",
+        str(Path(__file__).resolve().parents[1] / "config/reality-targets.json"),
+    )
+    sys.modules.pop("app.main", None)
+    return importlib.import_module("app.main")
+
+
+def test_installer_stub_nodes_table_is_repaired_and_node_creation_succeeds(tmp_path, monkeypatch):
+    """v0.3.8/v0.3.9 installers pre-created a 5 column stub that broke every insert."""
+    db = tmp_path / "stub.db"
+    connection = sqlite3.connect(db)
+    connection.execute(STUB_NODES_TABLE)
+    connection.commit(); connection.close()
+
+    module = _panel_module(db, monkeypatch, tmp_path)
+    module.init_db(); module.init_db()
+
+    connection = sqlite3.connect(db)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(nodes)")}
+    connection.close()
+    assert {"name", "protocol", "config", "created_at"} <= columns
+    assert "max_devices" in columns
+
+    monkeypatch.setattr(module, "xray_container", lambda: None)
+    with TestClient(module.app) as client:
+        login(client)
+        created = client.post("/api/nodes", json={
+            "name": "after repair", "protocol": "socks", "port": 21100, "max_devices": 2,
+        })
+        assert created.status_code == 201, created.text
+        assert created.json()["max_devices"] == 2
+        assert client.get("/api/nodes").status_code == 200
+    module.STOP_EVENT.set()
+
+
+def test_installer_never_creates_the_nodes_table(tmp_path, monkeypatch):
+    """The installer must not pre-create `nodes`; the panel owns the live schema."""
+    installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    assert not re.search(r"CREATE\s+TABLE(\s+IF\s+NOT\s+EXISTS)?\s+nodes", installer)
+    assert "CREATE TABLE IF NOT EXISTS nodes" not in installer
+
+
+def test_repair_preserves_rows_of_a_broken_nodes_table(tmp_path, monkeypatch):
+    """A corrupt table that somehow holds rows keeps them through the rebuild."""
+    db = tmp_path / "stub-with-rows.db"
+    connection = sqlite3.connect(db)
+    connection.execute(STUB_NODES_TABLE)
+    connection.executemany(
+        "INSERT INTO nodes(id,port,max_devices,enabled,expires_at) VALUES(?,?,?,?,?)",
+        [(1, 21200, 3, 1, None), (2, 21201, None, 0, 4102444800)],
+    )
+    connection.commit(); connection.close()
+
+    module = _panel_module(db, monkeypatch, tmp_path)
+    module.init_db()
+
+    connection = sqlite3.connect(db)
+    rows = connection.execute(
+        "SELECT id,port,max_devices,enabled,expires_at,protocol,config FROM nodes ORDER BY id"
+    ).fetchall()
+    backups = [
+        row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'nodes_corrupt_%'"
+        )
+    ]
+    preserved = connection.execute(
+        f"SELECT count(*) FROM {backups[0]}"
+    ).fetchone()[0]
+    connection.close()
+    assert [(row[0], row[1], row[2], row[4]) for row in rows] == [
+        (1, 21200, 3, None), (2, 21201, None, 4102444800),
+    ]
+    # Rows recovered without a protocol or config cannot serve traffic, so they
+    # come back disabled rather than breaking config rendering.
+    assert [row[3] for row in rows] == [0, 0]
+    assert [row[5] for row in rows] == ["socks", "socks"]
+    recovered = [json.loads(row[6]) for row in rows]
+    assert [entry["username"] for entry in recovered] == ["recovered", "recovered"]
+    # Placeholder credentials must be random, never a shared guessable secret.
+    assert len({entry["password"] for entry in recovered}) == 2
+    assert all(len(entry["password"]) == 32 for entry in recovered)
+    assert len(backups) == 1 and preserved == 2
+
+    # Rendering the config and listing nodes must both stay functional.
+    module.init_db()
+    monkeypatch.setattr(module, "xray_container", lambda: None)
+    with TestClient(module.app) as client:
+        login(client)
+        assert client.get("/api/nodes").status_code == 200
+    module.STOP_EVENT.set()
+
+
+def test_healthy_nodes_table_is_never_rebuilt(tmp_path, monkeypatch):
+    db = tmp_path / "healthy.db"
+    module = _panel_module(db, monkeypatch, tmp_path)
+    module.init_db()
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "INSERT INTO nodes(name,protocol,port,config,created_at) VALUES(?,?,?,?,?)",
+        ("keep", "socks", 21300, json.dumps({"username": "u", "password": "p"}), 7),
+    )
+    connection.commit(); connection.close()
+
+    module.init_db(); module.init_db()
+
+    connection = sqlite3.connect(db)
+    assert connection.execute("SELECT name,created_at FROM nodes").fetchall() == [("keep", 7)]
+    assert connection.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name LIKE 'nodes_corrupt_%'"
+    ).fetchone()[0] == 0
     connection.close()
 
 

@@ -379,8 +379,12 @@ live, snapshot = sys.argv[1:]
 os.makedirs(os.path.dirname(live), exist_ok=True)
 os.makedirs(os.path.dirname(snapshot), exist_ok=True)
 with sqlite3.connect(live) as db:
-    db.execute("CREATE TABLE IF NOT EXISTS nodes (id INTEGER, port INTEGER, max_devices INTEGER, enabled INTEGER, expires_at INTEGER)")
-    db.commit()
+    # The panel owns the live schema. Creating even a placeholder `nodes` table
+    # here is destructive: the panel uses CREATE TABLE IF NOT EXISTS, so a stub
+    # table silently suppresses the real schema and every node insert then fails
+    # with "table nodes has no column named name". netguard tolerates a snapshot
+    # whose nodes table is missing or lacks the device-limit columns, so publish
+    # the live database as-is.
     temporary = snapshot + ".tmp"
     try:
         os.unlink(temporary)

@@ -172,6 +172,39 @@ def connect_db():
     return conn
 
 
+# The columns the panel itself creates. A `nodes` table missing any of them was
+# not created by the panel and cannot store a node.
+NODES_BASE_COLUMNS = (
+    ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    ("name", "TEXT NOT NULL"),
+    ("protocol", "TEXT NOT NULL"),
+    ("port", "INTEGER NOT NULL UNIQUE"),
+    ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("config", "TEXT NOT NULL"),
+    ("created_at", "INTEGER NOT NULL"),
+)
+NODES_REQUIRED_COLUMNS = tuple(name for name, _ in NODES_BASE_COLUMNS)
+NODES_BASE_SCHEMA = ", ".join(f"{name} {definition}" for name, definition in NODES_BASE_COLUMNS)
+NODE_MIGRATIONS = (
+    (1, "expires_at", "expires_at INTEGER"),
+    (2, "max_connections", "max_connections INTEGER"),
+    (3, "traffic_uplink_base", "traffic_uplink_base INTEGER NOT NULL DEFAULT 0"),
+    (4, "traffic_downlink_base", "traffic_downlink_base INTEGER NOT NULL DEFAULT 0"),
+    (5, "traffic_uplink_raw", "traffic_uplink_raw INTEGER NOT NULL DEFAULT 0"),
+    (6, "traffic_downlink_raw", "traffic_downlink_raw INTEGER NOT NULL DEFAULT 0"),
+    (7, "traffic_sampled_at", "traffic_sampled_at REAL"),
+    (8, "traffic_limit_mb", "traffic_limit_mb INTEGER"),
+    (9, "traffic_uplink_origin", "traffic_uplink_origin INTEGER NOT NULL DEFAULT 0"),
+    (10, "traffic_downlink_origin", "traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
+    (11, "disabled_reason", "disabled_reason TEXT"),
+    (12, "max_devices", "max_devices INTEGER"),
+)
+# The fully migrated schema, used when rebuilding a table that still holds rows.
+NODES_FULL_SCHEMA = ", ".join(
+    [NODES_BASE_SCHEMA] + [definition for _, _, definition in NODE_MIGRATIONS]
+)
+
+
 def publish_netguard_snapshot():
     """Publish a closed SQLite backup without exposing the live WAL database."""
     if RUNTIME_BACKEND != "native" or not NETGUARD_REQUIRED:
@@ -202,8 +235,113 @@ def publish_netguard_snapshot():
         temporary.unlink(missing_ok=True)
 
 
-def _columns(conn) -> set[str]:
-    return {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
+def _columns(conn, table: str = "nodes") -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _table_exists(conn, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def repair_nodes_schema(conn):
+    """Rebuild a `nodes` table that is missing columns the panel itself creates.
+
+    Installers up to v0.3.9 pre-created a five column `nodes` stub before the
+    panel ever started. Because the panel creates its table with CREATE TABLE
+    IF NOT EXISTS, the real schema was silently skipped and every insert failed
+    with "table nodes has no column named name". Upgrading alone cannot fix such
+    a database, so heal it here on every start.
+    """
+    if not _table_exists(conn, "nodes"):
+        return None
+    existing = _columns(conn, "nodes")
+    missing = [column for column in NODES_REQUIRED_COLUMNS if column not in existing]
+    if not missing:
+        # A healthy table is never touched.
+        return None
+    rows = conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+    if not rows:
+        # Nothing to preserve: drop the stub and let init_db create the real
+        # schema immediately below.
+        conn.execute("DROP TABLE nodes")
+        conn.commit()
+        print(
+            "NodeLite repaired an incomplete nodes table (empty, recreated): "
+            f"missing {', '.join(missing)}",
+            flush=True,
+        )
+        return "recreated"
+    backup = f"nodes_corrupt_{int(time.time())}"
+    if conn.in_transaction:
+        # Never nest inside an implicit transaction opened by an earlier write.
+        conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"ALTER TABLE nodes RENAME TO {backup}")
+        conn.execute(f"CREATE TABLE nodes ({NODES_FULL_SCHEMA})")
+        targets, sources = _nodes_copy_plan(existing)
+        conn.execute(
+            f"INSERT INTO nodes({', '.join(targets)}) "
+            f"SELECT {', '.join(sources)} FROM {backup}"
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        # The original table is untouched. Move it aside so the panel can serve
+        # a correct schema while the old rows stay recoverable by hand.
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"ALTER TABLE nodes RENAME TO {backup}")
+        conn.execute(f"CREATE TABLE nodes ({NODES_FULL_SCHEMA})")
+        conn.commit()
+        print(
+            f"NodeLite could not copy {rows} row(s) out of an incomplete nodes "
+            f"table ({exc}); the original rows are preserved in {backup}",
+            flush=True,
+        )
+        return "preserved"
+    print(
+        f"NodeLite repaired an incomplete nodes table: missing "
+        f"{', '.join(missing)}, {rows} row(s) migrated, backup kept as {backup}",
+        flush=True,
+    )
+    return "migrated"
+
+
+def _nodes_copy_plan(existing: set[str]) -> tuple[list[str], list[str]]:
+    """Map the surviving columns of a broken table onto the correct schema."""
+    identifier = "COALESCE(id, rowid)" if "id" in existing else "rowid"
+    now = int(time.time())
+    # A row without a protocol and a config cannot describe the inbound it used
+    # to serve. Rebuild it as a disabled socks node with unique random
+    # credentials so listings and links still render and re-enabling it cannot
+    # expose a guessable account.
+    recoverable = {"protocol", "config"} <= existing
+    placeholder = (
+        "'{\"username\":\"recovered\",\"password\":\"' || lower(hex(randomblob(16))) || '\"}'"
+    )
+    plan = [
+        ("id", identifier),
+        ("name", f"COALESCE(NULLIF(name, ''), 'recovered-' || {identifier})"
+                 if "name" in existing else f"'recovered-' || {identifier}"),
+        ("port", "port" if "port" in existing else "NULL"),
+        ("created_at", f"COALESCE(created_at, {now})" if "created_at" in existing else str(now)),
+    ]
+    if recoverable:
+        plan += [
+            ("protocol", "protocol"),
+            ("config", "config"),
+            ("enabled", "COALESCE(enabled, 1)" if "enabled" in existing else "1"),
+        ]
+    else:
+        plan += [("protocol", "'socks'"), ("config", placeholder), ("enabled", "0")]
+    # Every other column is copied only when the broken table still has it, so
+    # the declared defaults apply to the rest.
+    for _, column, _ in NODE_MIGRATIONS:
+        if column in existing:
+            plan.append((column, column))
+    return [target for target, _ in plan], [source for _, source in plan]
 
 
 def init_db():
@@ -211,17 +349,8 @@ def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with STATE_LOCK, closing(connect_db()) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS nodes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          protocol TEXT NOT NULL,
-          port INTEGER NOT NULL UNIQUE,
-          enabled INTEGER NOT NULL DEFAULT 1,
-          config TEXT NOT NULL,
-          created_at INTEGER NOT NULL
-        )
-        """)
+        repair_nodes_schema(conn)
+        conn.execute(f"CREATE TABLE IF NOT EXISTS nodes ({NODES_BASE_SCHEMA})")
         conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
           version INTEGER PRIMARY KEY,
@@ -229,18 +358,8 @@ def init_db():
         )
         """)
         migrations = [
-            (1, "expires_at", "ALTER TABLE nodes ADD COLUMN expires_at INTEGER"),
-            (2, "max_connections", "ALTER TABLE nodes ADD COLUMN max_connections INTEGER"),
-            (3, "traffic_uplink_base", "ALTER TABLE nodes ADD COLUMN traffic_uplink_base INTEGER NOT NULL DEFAULT 0"),
-            (4, "traffic_downlink_base", "ALTER TABLE nodes ADD COLUMN traffic_downlink_base INTEGER NOT NULL DEFAULT 0"),
-            (5, "traffic_uplink_raw", "ALTER TABLE nodes ADD COLUMN traffic_uplink_raw INTEGER NOT NULL DEFAULT 0"),
-            (6, "traffic_downlink_raw", "ALTER TABLE nodes ADD COLUMN traffic_downlink_raw INTEGER NOT NULL DEFAULT 0"),
-            (7, "traffic_sampled_at", "ALTER TABLE nodes ADD COLUMN traffic_sampled_at REAL"),
-            (8, "traffic_limit_mb", "ALTER TABLE nodes ADD COLUMN traffic_limit_mb INTEGER"),
-            (9, "traffic_uplink_origin", "ALTER TABLE nodes ADD COLUMN traffic_uplink_origin INTEGER NOT NULL DEFAULT 0"),
-            (10, "traffic_downlink_origin", "ALTER TABLE nodes ADD COLUMN traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
-            (11, "disabled_reason", "ALTER TABLE nodes ADD COLUMN disabled_reason TEXT"),
-            (12, "max_devices", "ALTER TABLE nodes ADD COLUMN max_devices INTEGER"),
+            (version, column, f"ALTER TABLE nodes ADD COLUMN {definition}")
+            for version, column, definition in NODE_MIGRATIONS
         ]
         columns = _columns(conn)
         legacy_without_disabled_reason = "disabled_reason" not in columns

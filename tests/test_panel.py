@@ -1106,7 +1106,10 @@ def nft_json_for(guard, desired, elements=None):
     for node_id, port, limit in desired:
         nft_set = {"family": "inet", "table": "nodelite_netguard", "name": f"devices_{node_id}", "type": ["ipv4_addr", "ipv6_addr"], "flags": ["dynamic", "timeout"], "size": limit}
         if elements and node_id in elements:
-            nft_set["elem"] = [{"elem": {"val": {"concat": value}}} for value in elements[node_id]]
+            nft_set["elem"] = [
+                {"elem": {"val": {"concat": {"elements": value}}}}
+                for value in elements[node_id]
+            ]
         items.append({"set": nft_set})
         for role in guard.RULE_ROLES:
             family = role.split("-", 1)[0]

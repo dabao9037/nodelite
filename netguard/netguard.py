@@ -174,10 +174,14 @@ def render_ruleset(
             f"{{ type ipv4_addr . ipv6_addr; flags dynamic,timeout; "
             f"timeout {timeout_seconds}s; size {limit}; }}"
         )
-        addresses = sorted(
-            sources.get(port, set()),
-            key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value))),
-        )
+        raw_addresses = sources.get(port, set())
+        if isinstance(raw_addresses, (list, tuple)):
+            addresses = list(raw_addresses)
+        else:
+            addresses = sorted(
+                raw_addresses,
+                key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value))),
+            )
         if addresses:
             elements = ", ".join(
                 f"{_nft_key(address)} timeout {timeout_seconds}s" for address in addresses[:limit]
@@ -249,6 +253,10 @@ def _concat_address(value) -> str | None:
     if not isinstance(value, dict) or "concat" not in value:
         return None
     parts = value["concat"]
+    # nftables JSON has emitted both a bare list and an {"elements": [...]}
+    # wrapper across supported releases.
+    if isinstance(parts, dict):
+        parts = parts.get("elements")
     if not isinstance(parts, list) or len(parts) != 2:
         return None
     if parts[1] == "::":
@@ -306,7 +314,11 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     """Check the family, set reference and verdict encoded by a labelled rule."""
     family, action = role.split("-", 1)
     expression = json.dumps(rule.get("expr", []), sort_keys=True, separators=(",", ":"))
-    if family not in expression or _set_name(node_id) not in expression:
+    if family not in expression:
+        return False
+    # Reject rules intentionally do not reference the set: they are the final
+    # per-family catch-all after refresh, admission and membership checks.
+    if action != "reject" and _set_name(node_id) not in expression:
         return False
     # Admission, membership and rejection must apply to every packet.  In
     # particular, an already-established flow can resume after its source's
@@ -317,8 +329,8 @@ def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     required = {
         "refresh": ('"update"', '"return"'),
         "add": ('"add"',),
-        "accept": ('"return"',),
-        "reject": ('"reject"', "tcp reset"),
+        "accept": ('"lookup"', '"return"'),
+        "reject": ('"reject"',),
     }[action]
     return all(token in expression for token in required)
 
@@ -387,11 +399,17 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         raise InstalledMismatch("nftables rules do not match desired device limits")
 
 
-def _merge_sources(*mappings: dict[int, set[str]]) -> dict[int, set[str]]:
-    merged: dict[int, set[str]] = {}
+def _merge_sources(*mappings: dict[int, set[str]]) -> dict[int, list[str]]:
+    """Merge mappings in priority order while remaining deterministic."""
+    merged: dict[int, list[str]] = {}
     for mapping in mappings:
         for port, addresses in mapping.items():
-            merged.setdefault(port, set()).update(addresses)
+            output = merged.setdefault(port, [])
+            ordered = sorted(
+                addresses,
+                key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value))),
+            )
+            output.extend(address for address in ordered if address not in output)
     return merged
 
 

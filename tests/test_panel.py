@@ -1018,6 +1018,7 @@ def load_netguard(tmp_path, monkeypatch):
     ])
     connection.commit(); connection.close()
     monkeypatch.setattr(module, "DB_PATH", str(db))
+    monkeypatch.setattr(module, "LOCK_PATH", str(tmp_path / "netguard.lock"))
     return module
 
 
@@ -1026,6 +1027,7 @@ def test_netguard_cold_start_without_database(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("netguard_cold_start_test", path)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     monkeypatch.setattr(module, "DB_PATH", str(tmp_path / "not-created-yet.db"))
+    monkeypatch.setattr(module, "LOCK_PATH", str(tmp_path / "netguard.lock"))
     assert module.desired_rules(now=20) == []
 
     commands = []
@@ -1033,9 +1035,12 @@ def test_netguard_cold_start_without_database(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_ensure_table", lambda: commands.append(("ensure",)))
     monkeypatch.setattr(module, "_apply_ruleset", lambda script: commands.append(("apply", script)))
     monkeypatch.setattr(module, "_legacy_rollback", lambda: commands.append(("legacy",)))
+    checks = iter([module.TableMissing("missing"), None])
+    monkeypatch.setattr(module, "validate_installed", lambda desired: (_ for _ in ()).throw(value) if (value := next(checks)) else None)
     assert module.reconcile() == []
     assert commands[0] == ("ensure",)
-    assert "flush table inet nodelite_netguard" in commands[1][1]
+    assert "delete table inet nodelite_netguard" in commands[1][1]
+    assert "add table inet nodelite_netguard" in commands[1][1]
     assert "hook input" in commands[1][1]
     assert commands[2] == ("legacy",)
 
@@ -1048,49 +1053,94 @@ def test_netguard_reads_live_wal_data(tmp_path, monkeypatch):
     writer = sqlite3.connect(db)
     writer.execute("PRAGMA journal_mode=WAL")
     writer.execute("PRAGMA wal_autocheckpoint=0")
-    writer.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,expires_at INTEGER)")
-    writer.execute("INSERT INTO nodes VALUES(1,30001,1,2,NULL)")
+    writer.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,max_devices INTEGER,expires_at INTEGER)")
+    writer.execute("INSERT INTO nodes VALUES(1,30001,1,99,2,NULL)")
     writer.commit()
     monkeypatch.setattr(module, "DB_PATH", str(db))
     assert module.desired_rules(now=20) == [(1, 30001, 2)]
     writer.close()
 
 
+def test_netguard_does_not_reinterpret_legacy_connection_limit(tmp_path, monkeypatch):
+    path = Path(__file__).parents[1] / "netguard" / "netguard.py"
+    spec = importlib.util.spec_from_file_location("netguard_legacy_test", path)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    db = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db)
+    connection.execute("CREATE TABLE nodes(id INTEGER,port INTEGER,enabled INTEGER,max_connections INTEGER,expires_at INTEGER)")
+    connection.execute("INSERT INTO nodes VALUES(1,30001,1,2,NULL)")
+    connection.commit(); connection.close()
+    monkeypatch.setattr(module, "DB_PATH", str(db))
+    assert module.desired_rules(now=20) == []
+
+
 def test_netguard_health_fails_when_nft_probe_fails(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
-
-    def failed_probe(*args, **kwargs):
-        raise RuntimeError("nft unavailable")
-
-    monkeypatch.setattr(guard, "run", failed_probe)
+    monkeypatch.setattr(guard, "_nft_json", lambda: (_ for _ in ()).throw(RuntimeError("nft unavailable")))
     with pytest.raises(RuntimeError, match="nft unavailable"):
         guard.health()
 
 
-def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_rollback(tmp_path, monkeypatch):
+def _nft_expr(family, node_id, role, port):
+    expressions = [
+        {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": port}},
+        {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": family}},
+    ]
+    action = role.split("-", 1)[1]
+    if action == "refresh":
+        expressions += [{"update": {"op": {"concat": []}, "set": f"devices_{node_id}"}}, {"return": None}]
+    elif action == "add":
+        expressions += [{"add": {"op": {"concat": []}, "set": f"devices_{node_id}"}}]
+    elif action == "accept":
+        expressions += [{"lookup": {"source": {"concat": []}, "set": f"devices_{node_id}"}}, {"return": None}]
+    else:
+        expressions += [{"reject": {"type": "tcp reset"}}]
+    return expressions
+
+
+def nft_json_for(guard, desired, elements=None):
+    items = [{"metainfo": {"json_schema_version": 1}}, {"table": {"family": "inet", "name": "nodelite_netguard"}}]
+    items.append({"chain": {"family": "inet", "table": "nodelite_netguard", "name": "input", "type": "filter", "hook": "input", "prio": -5, "policy": "accept"}})
+    for node_id, port, limit in desired:
+        nft_set = {"family": "inet", "table": "nodelite_netguard", "name": f"devices_{node_id}", "type": ["ipv4_addr", "ipv6_addr"], "flags": ["dynamic", "timeout"], "size": limit}
+        if elements and node_id in elements:
+            nft_set["elem"] = [{"elem": {"val": {"concat": value}}} for value in elements[node_id]]
+        items.append({"set": nft_set})
+        for role in guard.RULE_ROLES:
+            family = role.split("-", 1)[0]
+            items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, role), "expr": _nft_expr(family, node_id, role, port)}})
+    return items
+
+
+def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_explicit_rollback(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
-    assert guard.desired_rules(now=20) == [(1, 30001, 2)]
+    desired = guard.desired_rules(now=20)
+    assert desired == [(1, 30001, 2)]
     sources = {30001: {"1.1.1.1", "2001:db8::1"}}
-    script = guard.render_ruleset(guard.desired_rules(now=20), sources, timeout_seconds=17)
+    script = guard.render_ruleset(desired, sources, timeout_seconds=17)
     assert "type ipv4_addr . ipv6_addr" in script
     assert "flags dynamic,timeout" in script
     assert "timeout 17s; size 2" in script
     assert "1.1.1.1 . :: timeout 17s" in script
     assert "0.0.0.0 . 2001:db8::1 timeout 17s" in script
     assert "meta nfproto ipv4" in script and "meta nfproto ipv6" in script
-    assert "ct state new add @devices_1" in script
-    assert "ct state new ip saddr . :: @devices_1 return" in script
-    assert "ct state new 0.0.0.0 . ip6 saddr @devices_1 return" in script
+    assert "add @devices_1" in script and "ct state new add @devices_1" not in script
     assert script.count("reject with tcp reset") == 2
     assert "connlimit" not in script and "iptables -A" not in script
+    # An ESTABLISHED flow that was idle past the timeout must be admitted again
+    # or rejected; it must never bypass through policy accept.
+    for line in script.splitlines():
+        if "-add"" in line or "-accept"" in line or "-reject"" in line:
+            assert "ct state new" not in line
 
     calls = []
+    checks = iter([guard.TableMissing("missing"), None])
+    monkeypatch.setattr(guard, "validate_installed", lambda value: (_ for _ in ()).throw(result) if (result := next(checks)) else None)
     monkeypatch.setattr(guard, "established_sources", lambda ports: sources)
     monkeypatch.setattr(guard, "_ensure_table", lambda: calls.append("ensure"))
     monkeypatch.setattr(guard, "_apply_ruleset", lambda value: calls.append(value))
     monkeypatch.setattr(guard, "_legacy_rollback", lambda: calls.append("legacy"))
-    rules = guard.reconcile()
-    assert rules == [{"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 2}]
+    assert guard.reconcile() == [{"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 2}]
     assert calls[0] == "ensure" and calls[-1] == "legacy"
 
     rollback_commands = []
@@ -1101,34 +1151,84 @@ def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_rollback(tmp_
     assert rollback_commands[-1] == ("legacy",)
 
 
-def test_netguard_reconcile_is_idempotent_atomic_table_replacement(tmp_path, monkeypatch):
+def test_netguard_normal_reconcile_does_not_rebuild_dynamic_sets(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
-    applied = []
+    desired = guard.desired_rules(now=20)
+    monkeypatch.setattr(guard, "_nft_json", lambda: nft_json_for(guard, desired))
     monkeypatch.setattr(guard, "established_sources", lambda ports: {30001: {"2.2.2.2"}})
+    monkeypatch.setattr(guard, "_apply_ruleset", lambda _script: pytest.fail("healthy reconcile rebuilt nft table"))
+    assert guard.reconcile()[0]["active_devices"] == 1
+
+
+def test_netguard_config_change_preserves_admitted_kernel_members(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    stale = nft_json_for(guard, [(1, 30001, 3)], {1: [["1.1.1.1", "::"], ["0.0.0.0", "2001:db8::1"]]})
+    monkeypatch.setattr(guard, "_nft_json", lambda: stale)
+    monkeypatch.setattr(guard, "established_sources", lambda ports: {30001: {"2.2.2.2"}})
+    applied = []
     monkeypatch.setattr(guard, "_ensure_table", lambda: None)
     monkeypatch.setattr(guard, "_apply_ruleset", applied.append)
-    monkeypatch.setattr(guard, "_legacy_rollback", lambda: None)
-    guard.reconcile(); guard.reconcile()
-    assert applied[0] == applied[1]
-    assert applied[0].count("flush table inet nodelite_netguard") == 1
+    checks = iter([guard.InstalledMismatch("changed"), None])
+    monkeypatch.setattr(guard, "validate_installed", lambda desired: (_ for _ in ()).throw(value) if (value := next(checks)) else None)
+    guard.reconcile()
+    assert "1.1.1.1 . ::" in applied[0]
+    assert "0.0.0.0 . 2001:db8::1" in applied[0]
+    assert "2.2.2.2 . ::" not in applied[0]  # deterministic size-2 truncation keeps admitted members first
 
 
+def test_netguard_db_and_nft_failures_retain_last_rules(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    applied = []
+    monkeypatch.setattr(guard, "_apply_ruleset", applied.append)
+    monkeypatch.setattr(guard, "desired_rules", lambda: (_ for _ in ()).throw(sqlite3.DatabaseError("corrupt")))
+    with pytest.raises(sqlite3.DatabaseError, match="corrupt"):
+        guard.reconcile()
+    assert applied == []
 
-def test_netguard_daemon_rolls_back_on_sigterm_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, "desired_rules", lambda: [(1, 30001, 2)])
+    monkeypatch.setattr(guard, "validate_installed", lambda desired: (_ for _ in ()).throw(RuntimeError("nft permission denied")))
+    with pytest.raises(RuntimeError, match="permission denied"):
+        guard.reconcile()
+    assert applied == []
+
+
+def test_netguard_health_precisely_checks_sets_rules_size_and_port(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    desired = guard.desired_rules(now=20)
+    current = nft_json_for(guard, desired)
+    monkeypatch.setattr(guard, "_nft_json", lambda: current)
+    assert guard.health() == {"status": "ok"}
+
+    cases = []
+    wrong_size = json.loads(json.dumps(current)); next(x["set"] for x in wrong_size if "set" in x)["size"] = 99; cases.append(wrong_size)
+    wrong_port = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_port if "rule" in x)["expr"][0]["match"]["right"] = 30002; cases.append(wrong_port)
+    missing_rule = json.loads(json.dumps(current)); missing_rule.pop(next(i for i,x in enumerate(missing_rule) if "rule" in x)); cases.append(missing_rule)
+    extra_set = json.loads(json.dumps(current)); extra_set.append({"set": {"family": "inet", "table": "nodelite_netguard", "name": "other", "type": "ipv4_addr"}}); cases.append(extra_set)
+    for malformed in cases:
+        monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)
+        with pytest.raises(guard.InstalledMismatch):
+            guard.health()
+
+
+def test_netguard_daemon_and_normal_stop_do_not_rollback(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(guard, "reconcile", lambda: calls.append("reconcile") or [])
     monkeypatch.setattr(guard, "rollback", lambda: calls.append("rollback"))
     monkeypatch.setattr(guard.time, "monotonic", lambda: 0)
-
-    def sleep(_seconds):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(guard.time, "sleep", sleep)
+    monkeypatch.setattr(guard.time, "sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         guard.daemon(0.5)
-    assert calls == ["reconcile", "rollback"]
+    assert calls == ["reconcile"]
 
+
+def test_netguard_reconcile_uses_cross_process_flock(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    events = []
+    monkeypatch.setattr(guard.fcntl, "flock", lambda _fd, mode: events.append(mode))
+    monkeypatch.setattr(guard, "_reconcile_locked", lambda: [])
+    assert guard.reconcile() == []
+    assert events == [guard.fcntl.LOCK_EX, guard.fcntl.LOCK_UN]
 
 def test_netguard_active_device_mapping_counts_unique_ipv4_and_ipv6_sources(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
@@ -1141,3 +1241,17 @@ def test_netguard_active_device_mapping_counts_unique_ipv4_and_ipv6_sources(tmp_
     )
     monkeypatch.setattr(guard, "run", lambda *args, **kwargs: output)
     assert guard.status([30001, 40000]) == {"30001": 3, "40000": 1}
+
+
+def test_netguard_idle_timeout_established_flow_cannot_bypass_policy_accept(tmp_path, monkeypatch):
+    """Regression: an idle ESTABLISHED source expires, then resumes traffic."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    script = guard.render_ruleset([(1, 30001, 1)], {}, timeout_seconds=1)
+    ipv4 = [line for line in script.splitlines() if "meta nfproto ipv4" in line]
+    assert len(ipv4) == 4
+    refresh, admission, membership, rejection = ipv4
+    assert "update @devices_1" in refresh and " return " in refresh
+    assert "add @devices_1" in admission
+    assert "ip saddr . :: @devices_1 return" in membership
+    assert "reject with tcp reset" in rejection
+    assert all("ct state new" not in line for line in (admission, membership, rejection))

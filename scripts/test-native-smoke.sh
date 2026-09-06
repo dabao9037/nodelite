@@ -15,6 +15,6 @@ done
 grep -q '127.0.0.1' "$ROOT/native/panel_entry.py"
 grep -q 'nodelite-xray.service' "$ROOT/app/main.py"
 grep -q 'nodelite-netguard.service' "$ROOT/app/main.py"
-grep -q 'ExecStopPost=.*rollback' "$PREFIX/etc/systemd/system/nodelite-netguard.service"
+! grep -q 'ExecStopPost=.*rollback' "$PREFIX/etc/systemd/system/nodelite-netguard.service"
 ! grep -q 'docker' "$ROOT/requirements-native.txt"
 echo "native smoke prefix verified: $PREFIX"

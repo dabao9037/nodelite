@@ -220,11 +220,9 @@ def init_db():
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?,?)",
                 (version, int(time.time())),
             )
-        # Preserve old databases and old API clients without changing the
-        # meaning of their stored value during an in-place upgrade.
-        conn.execute(
-            "UPDATE nodes SET max_devices=max_connections WHERE max_devices IS NULL AND max_connections IS NOT NULL"
-        )
+        # Do not reinterpret the legacy aggregate TCP connection limit as a
+        # device limit. Existing installations start with no device limit until
+        # the administrator explicitly saves one.
         now = int(time.time())
         if legacy_without_disabled_reason:
             # Upgrade inference is deliberately conservative: expired wins
@@ -664,10 +662,7 @@ def traffic_limit_values(row, used: int | None = None) -> dict:
 
 
 def _device_limit(row):
-    keys = row.keys()
-    if "max_devices" in keys and row["max_devices"] is not None:
-        return row["max_devices"]
-    return row["max_connections"] if "max_connections" in keys else None
+    return row["max_devices"] if "max_devices" in row.keys() else None
 
 
 def _telemetry_for_row(row, now: float, devices: int, rate: tuple[float, float] = (0.0, 0.0)):
@@ -1115,7 +1110,7 @@ def create(payload: NodeInput, _=Depends(require_admin)):
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
                    max_connections, max_devices, traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
-                 max_devices, max_devices, payload.traffic_limit_mb),
+                 None, max_devices, payload.traffic_limit_mb),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1166,9 +1161,9 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
                 enabled = 1
                 disabled_reason = None
         conn.execute(
-            """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?, traffic_limit_mb=?,
+            """UPDATE nodes SET name=?, expires_at=?, max_devices=?, traffic_limit_mb=?,
                enabled=?, disabled_reason=? WHERE id=?""",
-            (name, new_expiry, max_devices, max_devices, traffic_limit_mb,
+            (name, new_expiry, max_devices, traffic_limit_mb,
              enabled, disabled_reason, node_id),
         )
         conn.commit()

@@ -59,8 +59,10 @@ services:
       - NET_RAW
     environment:
       DB_PATH: /data/panel.db
+      NETGUARD_LOCK_PATH: /run/nodelite/netguard.lock
     volumes:
       - ./data:/data:ro
+      - netguard-run:/run/nodelite
     healthcheck:
       test: ["CMD", "python3", "/netguard.py", "health"]
       interval: 20s
@@ -87,3 +89,6 @@ services:
       timeout: 10s
       start_period: 10s
       retries: 3
+
+volumes:
+  netguard-run:

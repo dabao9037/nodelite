@@ -1,5 +1,5 @@
 [Unit]
-Description=NodeLite connection limit guard
+Description=NodeLite device limit guard
 After=network-online.target
 Wants=network-online.target
 Before=nodelite-panel.service
@@ -10,7 +10,6 @@ User=root
 Group=root
 EnvironmentFile=/opt/nodelite/config/nodelite.env
 ExecStart=/opt/nodelite/bin/nodelite-netguard daemon
-ExecStopPost=-/opt/nodelite/bin/nodelite-netguard rollback
 Restart=on-failure
 RestartSec=3
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW

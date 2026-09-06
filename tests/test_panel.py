@@ -1111,7 +1111,7 @@ def nft_json_for(guard, desired, elements=None):
                 family_elements = elements[node_id].get(family, [])
                 nft_set["elem"] = [{"elem": {"val": value}} for value in family_elements]
             items.append({"set": nft_set})
-            for role in guard.RULE_ROLES:
+            for role in (role for role in guard.RULE_ROLES if role.startswith(f"{family}-")):
                 items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, role), "expr": _nft_expr(family, node_id, role, port)}})
     return items
 
@@ -1263,3 +1263,72 @@ def test_netguard_idle_timeout_established_flow_cannot_bypass_policy_accept(tmp_
     assert "ip saddr @devices_1_v4 return" in membership
     assert "reject with tcp reset" in rejection
     assert all("ct state new" not in line for line in (admission, membership, rejection))
+
+
+def real_installed_fixture():
+    """Real `nft -j list table` output captured from nftables 1.0.9."""
+    path = Path(__file__).parent / "fixtures" / "nft_real_installed.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_netguard_validates_real_nft_output_and_stays_idempotent(tmp_path, monkeypatch):
+    """Regression: real nft JSON must validate so reconcile never rebuilds.
+
+    nft prints inet reject rules without their `meta nfproto` match, and rule
+    roles are `<family>-<action>`; a validator that mis-parses either one fails
+    every cycle, rebuilding the table and evicting admitted devices.
+    """
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    desired = [(1, 30001, 2), (2, 30002, 3)]
+    guard.validate_installed(desired)
+
+    monkeypatch.setattr(guard, "desired_rules", lambda: desired)
+    monkeypatch.setattr(guard, "established_sources", lambda ports: {port: set() for port in ports})
+    monkeypatch.setattr(guard, "_apply_ruleset", lambda _s: pytest.fail("healthy real table was rebuilt"))
+    monkeypatch.setattr(guard, "_ensure_table", lambda: pytest.fail("healthy real table was rebuilt"))
+    assert guard.reconcile() == [
+        {"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 0},
+        {"id": 2, "port": 30002, "limit": 3, "max_devices": 3, "active_devices": 0},
+    ]
+    assert guard.health() == {"status": "ok"}
+
+
+def test_netguard_rejects_wrong_family_and_reordered_real_rules(tmp_path, monkeypatch):
+    """A relabelled, cross-family or reordered rule must never validate."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    desired = [(1, 30001, 2), (2, 30002, 3)]
+
+    def rule_of(items, role):
+        return next(x["rule"] for x in items if x.get("rule", {}).get("comment") == guard._rule_comment(1, role))
+
+    swapped_set = real_installed_fixture()
+    rule_of(swapped_set, "ipv4-add")["expr"][1]["set"]["set"] = "@devices_1_v6"
+
+    swapped_payload = real_installed_fixture()
+    rule_of(swapped_payload, "ipv4-accept")["expr"][1]["match"]["left"]["payload"]["protocol"] = "ip6"
+
+    foreign_nfproto = real_installed_fixture()
+    rule_of(foreign_nfproto, "ipv6-reject")["expr"].insert(
+        1, {"match": {"op": "==", "left": {"meta": {"key": "nfproto"}}, "right": "ipv4"}}
+    )
+
+    reordered = real_installed_fixture()
+    indexes = [index for index, item in enumerate(reordered) if "rule" in item]
+    first, last = indexes[0], indexes[3]
+    reordered[first], reordered[last] = reordered[last], reordered[first]
+
+    for malformed in (swapped_set, swapped_payload, foreign_nfproto, reordered):
+        monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)
+        with pytest.raises(guard.InstalledMismatch):
+            guard.validate_installed(desired)
+
+
+def test_netguard_device_limit_counts_devices_across_both_families(tmp_path, monkeypatch):
+    """Regression: the limit counts devices per node, not per address family."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    script = guard.render_ruleset([(1, 30001, 2)], {30001: ["1.1.1.1", "2001:db8::1", "3.3.3.3"]})
+    seeded = [line for line in script.splitlines() if line.startswith("add element")]
+    assert sum(line.count("timeout") for line in seeded) == 2
+    assert "3.3.3.3" not in script

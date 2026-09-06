@@ -158,6 +158,12 @@ def _set_name(node_id: int, family: str) -> str:
     return f"{SET_PREFIX}{node_id}_{suffix}"
 
 
+def _other_family(family: str) -> str:
+    if family not in ("ipv4", "ipv6"):
+        raise ValueError("invalid address family")
+    return "ipv6" if family == "ipv4" else "ipv4"
+
+
 def _parse_set_name(name: str) -> tuple[int, str | None] | None:
     """Return (node id, family); family=None identifies the legacy concat set."""
     match = re.fullmatch(rf"{re.escape(SET_PREFIX)}(\d+)(?:_(v4|v6))?", name)
@@ -208,11 +214,15 @@ def render_ruleset(
                 raw_addresses,
                 key=lambda value: (ipaddress.ip_address(value).version, int(ipaddress.ip_address(value))),
             )
+        # The limit counts devices per node, not per address family: seed at
+        # most `limit` addresses in total, keeping caller priority order so
+        # already admitted kernel members survive a configuration change.
+        admitted = addresses[:limit]
         for family, version in (("ipv4", 4), ("ipv6", 6)):
-            family_addresses = [address for address in addresses if ipaddress.ip_address(address).version == version]
+            family_addresses = [address for address in admitted if ipaddress.ip_address(address).version == version]
             if family_addresses:
                 elements = ", ".join(
-                    f"{address} timeout {timeout_seconds}s" for address in family_addresses[:limit]
+                    f"{address} timeout {timeout_seconds}s" for address in family_addresses
                 )
                 lines.append(f"add element {TABLE_FAMILY} {TABLE} {names[family]} {{ {elements} }}")
             key = "ip saddr" if family == "ipv4" else "ip6 saddr"
@@ -357,17 +367,51 @@ def _rule_port(rule: dict) -> int | None:
     return None
 
 
+def _nfproto_families(expressions) -> set[str]:
+    """Collect explicit `meta nfproto` comparisons carried by a rule."""
+    families: set[str] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            match = node.get("match")
+            if isinstance(match, dict):
+                left = match.get("left")
+                if isinstance(left, dict) and left.get("meta") == {"key": "nfproto"}:
+                    right = match.get("right")
+                    values = right if isinstance(right, list) else [right]
+                    families.update(value for value in values if isinstance(value, str))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(expressions)
+    return families
+
+
 def _rule_shape_is_valid(rule: dict, node_id: int, role: str) -> bool:
     """Check the address family, set reference and verdict of a labelled rule."""
     family, action = role.split("-", 1)
-    expression = json.dumps(rule.get("expr", []), sort_keys=True, separators=(",", ":"))
+    expressions = rule.get("expr", [])
+    expression = json.dumps(expressions, sort_keys=True, separators=(",", ":"))
     address_protocol = f'"protocol":"{"ip" if family == "ipv4" else "ip6"}"'
+    foreign_protocol = f'"protocol":"{"ip6" if family == "ipv4" else "ip"}"'
     synthetic_family = f'"right":"{family}"'
+    # An explicit nfproto comparison must agree with the rule's label. `nft`
+    # hides nfproto when printing inet reject rules even though the kernel
+    # keeps it, so absence is tolerated; disagreement never is.
+    installed_families = _nfproto_families(expressions)
+    if installed_families - {family}:
+        return False
     # Reject rules do not carry an address expression, but all preceding
     # family-specific rules do. Their order plus exact labelled rule inventory
     # makes the paired final reject unambiguous. Synthetic test fixtures encode
     # the family as an explicit meta-nfproto comparison.
     if action != "reject" and address_protocol not in expression and synthetic_family not in expression:
+        return False
+    # A rule must never touch the other family's addresses or set.
+    if foreign_protocol in expression or _set_name(node_id, _other_family(family)) in expression:
         return False
     # nft JSON represents set names either as devices_N or @devices_N,
     # depending on whether it came from libnftables JSON input or parsed CLI.
@@ -443,6 +487,7 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
 
 
     actual_rules: dict[str, int] = {}
+    installed_order: list[str] = []
     for item in items:
         rule = item.get("rule")
         if not rule:
@@ -458,10 +503,11 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         matched = re.fullmatch(rf"{re.escape(COMMENT_PREFIX)}(\d+)-(ipv4|ipv6)-(.+)", comment)
         if not matched:
             raise InstalledMismatch("invalid NodeLite nftables rule label")
-        node_id, role = int(matched.group(1)), matched.group(2)
+        node_id, role = int(matched.group(1)), f"{matched.group(2)}-{matched.group(3)}"
         if node_id not in expected or role not in RULE_ROLES or not _rule_shape_is_valid(rule, node_id, role):
             raise InstalledMismatch("invalid NodeLite nftables rule expression")
         actual_rules[comment] = port
+        installed_order.append(comment)
     expected_rules = {
         _rule_comment(node_id, role): port
         for node_id, (port, _limit) in expected.items()
@@ -469,6 +515,16 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
     }
     if actual_rules != expected_rules:
         raise InstalledMismatch("nftables rules do not match desired device limits")
+    # Order is load-bearing: refresh/add/accept must precede the paired reject,
+    # and `nft` hides nfproto on inet reject rules, so position is the only
+    # remaining proof that each reject guards its own family.
+    expected_order = [
+        _rule_comment(node_id, role)
+        for node_id, _port, _limit in desired
+        for role in RULE_ROLES
+    ]
+    if installed_order != expected_order:
+        raise InstalledMismatch("nftables rules are installed in the wrong order")
 
 
 def _merge_sources(*mappings: dict[int, set[str]]) -> dict[int, list[str]]:

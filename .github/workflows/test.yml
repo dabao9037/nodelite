@@ -66,6 +66,7 @@ jobs:
           bash scripts/test-installer-tcpfit-git.sh
           sudo bash scripts/test-installer-network-toggles.sh
           bash scripts/test-installer-release-404-retry.sh
+          bash scripts/test-installer-latest-cache-and-version.sh
           sudo bash scripts/test-native-runtime-directory.sh
           bash scripts/test-installer-sbin-path.sh
           bash scripts/test-ui-port-display.sh

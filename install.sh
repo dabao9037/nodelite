@@ -212,7 +212,23 @@ validate_release_compatibility() {
 }
 latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
-  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+  local attempt payload tag url
+  for attempt in 1 2 3 4 5; do
+    url="https://api.github.com/repos/$REPO/releases/latest?nodelite=$(date +%s)-$attempt-$RANDOM"
+    payload="$(curl -fsSL \
+      --connect-timeout 15 --max-time 60 \
+      --retry 3 --retry-all-errors --retry-delay 2 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$url" 2>/dev/null || true)"
+    tag="$(printf '%s' "$payload" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-native$ ]]; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+    sleep $((attempt * 2))
+  done
+  return 1
 }
 
 download_native_asset() {
@@ -546,6 +562,12 @@ install_or_update() {
   preflight_port "$port"
   choose_internal_port "$old_internal"
   install_release_code "$release_dir"
+  [[ -s "$INSTALL_DIR/VERSION" ]] || die "安装后的版本文件缺失；拒绝报告更新成功"
+  [[ "$(cat "$INSTALL_DIR/VERSION")" == "$tag" ]] || \
+    die "安装后版本不匹配：期望 $tag，实际 $(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo 未知)"
+  [[ -s "$INSTALL_DIR/BUILD_COMMIT" ]] || die "安装后的构建提交标记缺失；拒绝报告更新成功"
+  cmp -s "$INSTALL_DIR/install.sh" "$release_dir/install.sh" || \
+    die "安装后的管理脚本不是本次发行包版本；拒绝报告更新成功"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'

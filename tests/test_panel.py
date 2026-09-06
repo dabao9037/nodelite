@@ -1517,3 +1517,35 @@ def test_write_config_is_atomic_under_concurrent_writers(panel):
     assert json.loads(module.XRAY_CONFIG_PATH.read_text(encoding="utf-8"))["inbounds"] is not None
     leftovers = list(module.XRAY_CONFIG_PATH.parent.glob("*.tmp"))
     assert leftovers == []
+
+@pytest.mark.parametrize("size", [None, 4096])
+def test_netguard_accepts_lossy_or_kernel_rewritten_set_size(tmp_path, monkeypatch, size):
+    """`nft -j list` may omit/rewrite set size; stable identity/rules enforce safety."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    for item in installed:
+        nft_set = item.get("set")
+        if not nft_set:
+            continue
+        if size is None:
+            nft_set.pop("size", None)
+        else:
+            nft_set["size"] = size
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])
+
+
+def test_netguard_still_rejects_missing_or_invalid_device_sets(tmp_path, monkeypatch):
+    guard = load_netguard(tmp_path, monkeypatch)
+    desired = [(1, 30001, 2), (2, 30002, 3)]
+
+    missing = real_installed_fixture()
+    missing.remove(next(item for item in missing if item.get("set", {}).get("name") == "devices_1_v4"))
+
+    invalid_size = real_installed_fixture()
+    next(item["set"] for item in invalid_size if item.get("set", {}).get("name") == "devices_1_v4")["size"] = 0
+
+    for malformed in (missing, invalid_size):
+        monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)
+        with pytest.raises(guard.InstalledMismatch):
+            guard.validate_installed(desired)

@@ -17,10 +17,12 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+StateDirectory=nodelite
 RuntimeDirectory=nodelite
 RuntimeDirectoryMode=0770
 ReadWritePaths=/run/nodelite
-ReadOnlyPaths=/opt/nodelite/data
+ReadOnlyPaths=/var/lib/nodelite
+InaccessiblePaths=/opt/nodelite/data
 
 [Install]
 WantedBy=multi-user.target

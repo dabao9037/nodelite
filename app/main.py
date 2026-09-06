@@ -12,6 +12,7 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -42,6 +43,7 @@ NETGUARD_SERVICE = "nodelite-netguard.service"
 NATIVE_XRAY_BIN = NODELITE_HOME / "bin/xray"
 NATIVE_NETGUARD_BIN = NODELITE_HOME / "bin/nodelite-netguard"
 NATIVE_NETGUARD_SOCKET = Path(os.getenv("NETGUARD_SOCKET", "/run/nodelite/netguard.sock"))
+NETGUARD_DB_PATH = Path(os.getenv("NETGUARD_DB_PATH", "/var/lib/nodelite/netguard.db"))
 NETGUARD_REQUIRED = os.getenv("NETGUARD_REQUIRED", "1") != "0"
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_CREDENTIAL = os.getenv("ADMIN_" + "PASSWORD", "")
@@ -168,6 +170,36 @@ def connect_db():
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def publish_netguard_snapshot():
+    """Publish a closed SQLite backup without exposing the live WAL database."""
+    if RUNTIME_BACKEND != "native" or not NETGUARD_REQUIRED:
+        return
+    NETGUARD_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(NETGUARD_DB_PATH.parent, 0o750)
+    fd, temporary_name = __import__("tempfile").mkstemp(
+        prefix=f".{NETGUARD_DB_PATH.name}.", suffix=".tmp", dir=NETGUARD_DB_PATH.parent
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        with STATE_LOCK, closing(connect_db()) as source:
+            target = sqlite3.connect(temporary)
+            try:
+                source.backup(target)
+                target.commit()
+            finally:
+                target.close()
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, NETGUARD_DB_PATH)
+        directory_fd = os.open(NETGUARD_DB_PATH.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _columns(conn) -> set[str]:
@@ -414,6 +446,7 @@ def netguard_exec(*args):
 
 def reconcile_limits():
     if NETGUARD_REQUIRED:
+        publish_netguard_snapshot()
         netguard_exec("reconcile")
 
 

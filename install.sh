@@ -359,6 +359,30 @@ repair_native_permissions() {
   chmod 0700 "$INSTALL_DIR/data"
   chmod 0750 /var/lib/nodelite
   chmod 0770 /run/nodelite
+  command -v python3 >/dev/null 2>&1 || die "原生模式需要 python3 以初始化 netguard 数据库快照"
+  python3 - "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db <<'PY'
+import os
+import sqlite3
+import sys
+
+live, snapshot = sys.argv[1:]
+os.makedirs(os.path.dirname(live), exist_ok=True)
+os.makedirs(os.path.dirname(snapshot), exist_ok=True)
+with sqlite3.connect(live) as db:
+    db.execute("CREATE TABLE IF NOT EXISTS nodes (id INTEGER, port INTEGER, max_devices INTEGER, enabled INTEGER, expires_at INTEGER)")
+    db.commit()
+    temporary = snapshot + ".tmp"
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    with sqlite3.connect(temporary) as target:
+        db.backup(target)
+    os.chmod(temporary, 0o640)
+    os.replace(temporary, snapshot)
+PY
+  chown root:root "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db
+  chmod 0640 "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db
   set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_PATH /var/lib/nodelite/netguard.db
   set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_IMMUTABLE 1
 }

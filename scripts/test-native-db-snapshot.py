@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
@@ -20,11 +21,19 @@ with tempfile.TemporaryDirectory() as raw:
     writer.commit()
 
     # Exercise the production backup algorithm while a WAL writer remains open.
-    temporary = snapshot.with_name(".netguard.db.tmp")
-    with sqlite3.connect(live, timeout=15) as source, sqlite3.connect(temporary) as target:
-        source.backup(target)
-    os.chmod(temporary, 0o640)
-    os.replace(temporary, snapshot)
+    os.environ.update(
+        RUNTIME_BACKEND="native",
+        NODELITE_HOME=str(work),
+        DB_PATH=str(live),
+        NETGUARD_DB_PATH=str(snapshot),
+        NETGUARD_REQUIRED="1",
+        ADMIN_USER="admin",
+        ADMIN_PASSWORD="test-password",
+        APP_SECRET="test-secret",
+    )
+    sys.path.insert(0, str(root))
+    from app import main as panel
+    panel.publish_netguard_snapshot()
     writer.close()
 
     snapshot.parent.chmod(0o555)

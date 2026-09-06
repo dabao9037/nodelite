@@ -75,8 +75,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           test -n "$RELEASE_TAG"
-          latest_tag=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)
-          test "$latest_tag" = "$RELEASE_TAG"
+          release_json=$(gh api "repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+          asset_count=$(printf '%s' "$release_json" | jq '.assets | length')
+          test "$asset_count" -eq 4
           work=$(mktemp -d)
           cd "$work"
           for arch in amd64 arm64; do

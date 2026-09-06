@@ -74,10 +74,28 @@ jobs:
       - name: Verify empty-directory Compose startup
         run: sudo NODELITE_FRESH_INSTALL_TEST=1 bash scripts/test-fresh-install.sh
 
+  release-workflow-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prevent releases with missing or ambiguous asset targets
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/native-release.yml').read_text()
+          assert 'release_tag:' in workflow
+          assert 'required: true' in workflow
+          assert 'inputs.release_tag' in workflow
+          assert 'github.ref_name' not in workflow
+          assert 'verify-published-release:' in workflow
+          assert 'curl -fL --retry 5' in workflow
+          assert 'PUBLIC_NATIVE_RELEASE_VERIFIED' in workflow
+          PY
+
   publish-images:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [static-checks, fresh-install]
+    needs: [static-checks, fresh-install, release-workflow-guard]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

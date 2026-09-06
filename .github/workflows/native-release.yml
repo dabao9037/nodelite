@@ -2,6 +2,11 @@ name: native-release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub Release tag to receive the native assets"
+        required: true
+        type: string
   release:
     types: [published]
 
@@ -51,8 +56,40 @@ jobs:
           name: nodelite-linux-${{ matrix.arch }}
           path: dist/*
       - name: Attach assets to GitHub Release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          test -n "$RELEASE_TAG"
+          gh release view "$RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+
+  verify-published-release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+    steps:
+      - name: Verify latest release and all public native assets
+        run: |
+          set -Eeuo pipefail
+          test -n "$RELEASE_TAG"
+          latest_tag=$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)
+          test "$latest_tag" = "$RELEASE_TAG"
+          work=$(mktemp -d)
+          cd "$work"
+          for arch in amd64 arm64; do
+            base="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/nodelite-linux-$arch.tar.gz"
+            curl -fL --retry 5 --retry-delay 2 "$base" -o "nodelite-linux-$arch.tar.gz"
+            curl -fL --retry 5 --retry-delay 2 "$base.sha256" -o "nodelite-linux-$arch.tar.gz.sha256"
+            expected=$(awk '{print $1}' "nodelite-linux-$arch.tar.gz.sha256")
+            actual=$(sha256sum "nodelite-linux-$arch.tar.gz" | awk '{print $1}')
+            test "$expected" = "$actual"
+            mkdir "$arch"
+            tar -C "$arch" -xzf "nodelite-linux-$arch.tar.gz"
+            test "$(cat "$arch/BUILD_COMMIT")" = "$GITHUB_SHA"
+            grep -q 'devices_.*_v4' "$arch/source/netguard.py"
+            grep -q 'devices_.*_v6' "$arch/source/netguard.py"
+          done
+          echo "PUBLIC_NATIVE_RELEASE_VERIFIED $RELEASE_TAG $GITHUB_SHA"

@@ -649,9 +649,23 @@ def current_rows():
 def write_config(rows=None):
     rows = rows if rows is not None else current_rows()
     XRAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp = XRAY_CONFIG_PATH.with_suffix(".tmp")
-    temp.write_text(json.dumps(config_for(rows), ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(XRAY_CONFIG_PATH)
+    payload = json.dumps(config_for(rows), ensure_ascii=False, indent=2)
+    # A per-call temporary name keeps concurrent writers from replacing the
+    # live config with another writer's partially written file.
+    handle, temp_name = tempfile.mkstemp(
+        dir=str(XRAY_CONFIG_PATH.parent), prefix=f"{XRAY_CONFIG_PATH.name}.", suffix=".tmp"
+    )
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, 0o640)
+        temp.replace(XRAY_CONFIG_PATH)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def parse_xray_stats(payload: str | dict) -> dict[int, dict[str, int]]:
@@ -933,7 +947,10 @@ def background_loop():
 def startup():
     global WORKER, RUNTIME_DIRTY
     init_db()
-    write_config()
+    # Serialize with any in-flight rebuild so startup cannot publish a config
+    # generated from a stale snapshot over a newer one.
+    with REBUILD_LOCK, STATE_LOCK:
+        write_config()
     # The control-plane must restore both the generated Xray configuration and
     # the dedicated connection-limit chain after every container/host restart.
     RUNTIME_DIRTY = True

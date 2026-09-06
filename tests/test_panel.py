@@ -1332,3 +1332,33 @@ def test_netguard_device_limit_counts_devices_across_both_families(tmp_path, mon
     seeded = [line for line in script.splitlines() if line.startswith("add element")]
     assert sum(line.count("timeout") for line in seeded) == 2
     assert "3.3.3.3" not in script
+
+
+def test_write_config_is_atomic_under_concurrent_writers(panel):
+    """Regression: a shared temp path let one writer publish another's partial file.
+
+    Startup and the background rebuild can both render the Xray config. With a
+    single `<name>.tmp` path, `replace()` could promote a half-written file, so
+    Xray or the panel would read invalid/empty JSON.
+    """
+    module, _ = panel
+    module.XRAY_CONFIG_PATH.write_text('{"seed": true}', encoding="utf-8")
+    errors = []
+
+    def writer():
+        try:
+            for _ in range(25):
+                module.write_config()
+                json.loads(module.XRAY_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - failure detail only
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == []
+    assert json.loads(module.XRAY_CONFIG_PATH.read_text(encoding="utf-8"))["inbounds"] is not None
+    leftovers = list(module.XRAY_CONFIG_PATH.parent.glob("*.tmp"))
+    assert leftovers == []

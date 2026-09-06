@@ -90,7 +90,15 @@ jobs:
             mkdir "$arch"
             tar -C "$arch" -xzf "nodelite-linux-$arch.tar.gz"
             test "$(cat "$arch/BUILD_COMMIT")" = "$GITHUB_SHA"
-            grep -q 'devices_.*_v4' "$arch/source/netguard.py"
-            grep -q 'devices_.*_v6' "$arch/source/netguard.py"
+            guard="$arch/source/netguard/netguard.py"
+            test -f "$guard"
+            grep -q 'devices_.*_v4' "$guard"
+            grep -q 'devices_.*_v6' "$guard"
+            # The v0.3.9 device-limit fix: full <family>-<action> role parsing,
+            # cross-family rejection and per-node (not per-family) limits.
+            grep -q 'matched.group(2)}-{matched.group(3)' "$guard"
+            grep -q '_other_family' "$guard"
+            grep -q 'installed_order != expected_order' "$guard"
+            grep -q 'admitted = addresses\[:limit\]' "$guard"
           done
           echo "PUBLIC_NATIVE_RELEASE_VERIFIED $RELEASE_TAG $GITHUB_SHA"

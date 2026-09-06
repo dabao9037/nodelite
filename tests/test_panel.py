@@ -1089,12 +1089,13 @@ def _nft_expr(family, node_id, role, port, ct_new=False):
     if ct_new:
         expressions.append({"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "new"}})
     action = role.split("-", 1)[1]
+    set_name = f"devices_{node_id}_{'v4' if family == 'ipv4' else 'v6'}"
     if action == "refresh":
-        expressions += [{"update": {"op": {"concat": []}, "set": f"devices_{node_id}"}}, {"return": None}]
+        expressions += [{"update": {"op": {"payload": {"protocol": "ip" if family == "ipv4" else "ip6", "field": "saddr"}}, "set": set_name}}, {"return": None}]
     elif action == "add":
-        expressions += [{"add": {"op": {"concat": []}, "set": f"devices_{node_id}"}}]
+        expressions += [{"add": {"op": {"payload": {"protocol": "ip" if family == "ipv4" else "ip6", "field": "saddr"}}, "set": set_name}}]
     elif action == "accept":
-        expressions += [{"lookup": {"source": {"concat": []}, "set": f"devices_{node_id}"}}, {"return": None}]
+        expressions += [{"lookup": {"source": {"payload": {"protocol": "ip" if family == "ipv4" else "ip6", "field": "saddr"}}, "set": set_name}}, {"return": None}]
     else:
         expressions += [{"reject": {"type": "tcp reset"}}]
     return expressions
@@ -1104,16 +1105,14 @@ def nft_json_for(guard, desired, elements=None):
     items = [{"metainfo": {"json_schema_version": 1}}, {"table": {"family": "inet", "name": "nodelite_netguard"}}]
     items.append({"chain": {"family": "inet", "table": "nodelite_netguard", "name": "input", "type": "filter", "hook": "input", "prio": -5, "policy": "accept"}})
     for node_id, port, limit in desired:
-        nft_set = {"family": "inet", "table": "nodelite_netguard", "name": f"devices_{node_id}", "type": ["ipv4_addr", "ipv6_addr"], "flags": ["dynamic", "timeout"], "timeout": guard.DEVICE_TIMEOUT_SECONDS, "size": limit}
-        if elements and node_id in elements:
-            nft_set["elem"] = [
-                {"elem": {"val": {"concat": {"elements": value}}}}
-                for value in elements[node_id]
-            ]
-        items.append({"set": nft_set})
-        for role in guard.RULE_ROLES:
-            family = role.split("-", 1)[0]
-            items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, role), "expr": _nft_expr(family, node_id, role, port)}})
+        for family, suffix, address_type in (("ipv4", "v4", "ipv4_addr"), ("ipv6", "v6", "ipv6_addr")):
+            nft_set = {"family": "inet", "table": "nodelite_netguard", "name": f"devices_{node_id}_{suffix}", "type": address_type, "flags": ["dynamic", "timeout"], "timeout": guard.DEVICE_TIMEOUT_SECONDS, "size": limit}
+            if elements and node_id in elements:
+                family_elements = elements[node_id].get(family, [])
+                nft_set["elem"] = [{"elem": {"val": value}} for value in family_elements]
+            items.append({"set": nft_set})
+            for role in guard.RULE_ROLES:
+                items.append({"rule": {"family": "inet", "table": "nodelite_netguard", "chain": "input", "comment": guard._rule_comment(node_id, family, role), "expr": _nft_expr(family, node_id, role, port)}})
     return items
 
 
@@ -1123,11 +1122,12 @@ def test_nft_dynamic_set_generation_ipv4_ipv6_capacity_release_and_explicit_roll
     assert desired == [(1, 30001, 2)]
     sources = {30001: {"1.1.1.1", "2001:db8::1"}}
     script = guard.render_ruleset(desired, sources, timeout_seconds=17)
-    assert "type ipv4_addr . ipv6_addr" in script
+    assert "type ipv4_addr" in script and "type ipv6_addr" in script
+    assert "devices_1_v4" in script and "devices_1_v6" in script
     assert "flags dynamic,timeout" in script
     assert "timeout 17s; size 2" in script
-    assert "1.1.1.1 . :: timeout 17s" in script
-    assert "0.0.0.0 . 2001:db8::1 timeout 17s" in script
+    assert "1.1.1.1 timeout 17s" in script
+    assert "2001:db8::1 timeout 17s" in script
     assert "meta nfproto ipv4" in script and "meta nfproto ipv6" in script
     assert "add @devices_1" in script and "ct state new add @devices_1" not in script
     assert script.count("reject with tcp reset") == 2
@@ -1167,7 +1167,7 @@ def test_netguard_normal_reconcile_does_not_rebuild_dynamic_sets(tmp_path, monke
 
 def test_netguard_config_change_preserves_admitted_kernel_members(tmp_path, monkeypatch):
     guard = load_netguard(tmp_path, monkeypatch)
-    stale = nft_json_for(guard, [(1, 30001, 3)], {1: [["1.1.1.1", "::"], ["0.0.0.0", "2001:db8::1"]]})
+    stale = nft_json_for(guard, [(1, 30001, 3)], {1: {"ipv4": ["1.1.1.1"], "ipv6": ["2001:db8::1"]}})
     monkeypatch.setattr(guard, "_nft_json", lambda: stale)
     monkeypatch.setattr(guard, "established_sources", lambda ports: {30001: {"2.2.2.2"}})
     applied = []
@@ -1176,9 +1176,9 @@ def test_netguard_config_change_preserves_admitted_kernel_members(tmp_path, monk
     checks = iter([guard.InstalledMismatch("changed"), None])
     monkeypatch.setattr(guard, "validate_installed", lambda desired: (_ for _ in ()).throw(value) if (value := next(checks)) else None)
     guard.reconcile()
-    assert "1.1.1.1 . ::" in applied[0]
-    assert "0.0.0.0 . 2001:db8::1" in applied[0]
-    assert "2.2.2.2 . ::" not in applied[0]  # deterministic size-2 truncation keeps admitted members first
+    assert "add element inet nodelite_netguard devices_1_v4 { 1.1.1.1 timeout" in applied[0]
+    assert "add element inet nodelite_netguard devices_1_v6 { 2001:db8::1 timeout" in applied[0]
+    assert "2.2.2.2 timeout" not in applied[0]
 
 
 def test_netguard_db_and_nft_failures_retain_last_rules(tmp_path, monkeypatch):
@@ -1207,10 +1207,10 @@ def test_netguard_health_precisely_checks_sets_rules_size_and_port(tmp_path, mon
     cases = []
     wrong_size = json.loads(json.dumps(current)); next(x["set"] for x in wrong_size if "set" in x)["size"] = 99; cases.append(wrong_size)
     wrong_timeout = json.loads(json.dumps(current)); next(x["set"] for x in wrong_timeout if "set" in x)["timeout"] = 99; cases.append(wrong_timeout)
-    wrong_family = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_family if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"][1]["match"]["right"] = "ipv6"; cases.append(wrong_family)
+    wrong_family = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_family if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4", "add"))["expr"][1]["match"]["right"] = "ipv6"; cases.append(wrong_family)
     wrong_port = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_port if "rule" in x)["expr"][0]["match"]["right"] = 30002; cases.append(wrong_port)
     missing_rule = json.loads(json.dumps(current)); missing_rule.pop(next(i for i,x in enumerate(missing_rule) if "rule" in x)); cases.append(missing_rule)
-    ct_new_add = json.loads(json.dumps(current)); next(x["rule"] for x in ct_new_add if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"] = _nft_expr("ipv4", 1, "ipv4-add", 30001, ct_new=True); cases.append(ct_new_add)
+    ct_new_add = json.loads(json.dumps(current)); next(x["rule"] for x in ct_new_add if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4", "add"))["expr"] = _nft_expr("ipv4", 1, "ipv4-add", 30001, ct_new=True); cases.append(ct_new_add)
     extra_set = json.loads(json.dumps(current)); extra_set.append({"set": {"family": "inet", "table": "nodelite_netguard", "name": "other", "type": "ipv4_addr"}}); cases.append(extra_set)
     for malformed in cases:
         monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)
@@ -1260,6 +1260,6 @@ def test_netguard_idle_timeout_established_flow_cannot_bypass_policy_accept(tmp_
     refresh, admission, membership, rejection = ipv4
     assert "update @devices_1" in refresh and " return " in refresh
     assert "add @devices_1" in admission
-    assert "ip saddr . :: @devices_1 return" in membership
+    assert "ip saddr @devices_1_v4 return" in membership
     assert "reject with tcp reset" in rejection
     assert all("ct state new" not in line for line in (admission, membership, rejection))

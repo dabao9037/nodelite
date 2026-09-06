@@ -455,7 +455,7 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         port = _rule_port(rule)
         if port is None or comment in actual_rules:
             raise InstalledMismatch("invalid or duplicate NodeLite nftables rule")
-        matched = re.fullmatch(rf"{re.escape(COMMENT_PREFIX)}(\d+)-(.+)", comment)
+        matched = re.fullmatch(rf"{re.escape(COMMENT_PREFIX)}(\d+)-(ipv4|ipv6)-(.+)", comment)
         if not matched:
             raise InstalledMismatch("invalid NodeLite nftables rule label")
         node_id, role = int(matched.group(1)), matched.group(2)

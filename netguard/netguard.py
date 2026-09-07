@@ -452,17 +452,59 @@ def _set_timeout_seconds(value) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value // 1000 if value >= 1000 and value % 1000 == 0 else value
+        # JSON duration units changed across libnftables generations and
+        # distro backports: seconds, milliseconds, microseconds and
+        # nanoseconds have all been observed. Only accept an exact rendering
+        # of our configured timeout so a genuinely different timeout cannot
+        # be mistaken for a unit conversion.
+        for multiplier in (1, 1_000, 1_000_000, 1_000_000_000):
+            if value == DEVICE_TIMEOUT_SECONDS * multiplier:
+                return DEVICE_TIMEOUT_SECONDS
+        return None
     if not isinstance(value, str):
         return None
-    matched = re.fullmatch(r"(\d+)(ms|s)?", value.strip())
+    matched = re.fullmatch(
+        r"(\d+)\s*(ns|nsec(?:ond)?s?|us|usec(?:ond)?s?|µs|ms|msec(?:ond)?s?|s|sec(?:ond)?s?)?",
+        value.strip().lower(),
+    )
     if not matched:
         return None
     amount = int(matched.group(1))
     unit = matched.group(2)
-    if unit == "ms":
-        return amount // 1000 if amount % 1000 == 0 else None
-    return amount
+    divisor = {
+        None: 1,
+        "s": 1,
+        "sec": 1,
+        "second": 1,
+        "seconds": 1,
+        "ms": 1_000,
+        "msec": 1_000,
+        "msecond": 1_000,
+        "mseconds": 1_000,
+        "us": 1_000_000,
+        "µs": 1_000_000,
+        "usec": 1_000_000,
+        "usecond": 1_000_000,
+        "useconds": 1_000_000,
+        "ns": 1_000_000_000,
+        "nsec": 1_000_000_000,
+        "nsecond": 1_000_000_000,
+        "nseconds": 1_000_000_000,
+    }.get(unit)
+    if divisor is None or amount != DEVICE_TIMEOUT_SECONDS * divisor:
+        return None
+    return DEVICE_TIMEOUT_SECONDS
+
+
+def _set_flags_are_valid(value) -> bool:
+    """Accept semantic timeout sets despite lossy libnftables flag echoing."""
+    if not isinstance(value, (list, tuple, set)):
+        return False
+    flags = {str(flag) for flag in value}
+    # Some nft versions omit `dynamic` when serialising a timeout set that is
+    # mutated by update/add rules. The rules are validated below, so timeout
+    # is the load-bearing set flag here. Reject every unrelated flag.
+    return "timeout" in flags and flags <= {"dynamic", "timeout"}
 
 
 def validate_installed(desired: list[tuple[int, int, int]]) -> None:
@@ -490,13 +532,12 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         # their admitted members, but always trigger replacement.
         if family is None:
             raise InstalledMismatch("legacy nftables device set requires migration")
-        flags = set(nft_set.get("flags", []))
         expected_type = "ipv4_addr" if family == "ipv4" else "ipv6_addr"
         if (
             nft_set.get("family") != TABLE_FAMILY
             or nft_set.get("table") != TABLE
             or nft_set.get("type") not in (expected_type, [expected_type])
-            or flags != {"dynamic", "timeout"}
+            or not _set_flags_are_valid(nft_set.get("flags", []))
             # Compare normalized seconds: nftables 1.0.9 emits numeric JSON
             # durations in milliseconds, while compatible fixtures may use
             # seconds or an explicit duration suffix.

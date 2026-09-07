@@ -1548,3 +1548,52 @@ def test_netguard_still_rejects_missing_or_invalid_device_sets(tmp_path, monkeyp
         monkeypatch.setattr(guard, "_nft_json", lambda malformed=malformed: malformed)
         with pytest.raises(guard.InstalledMismatch):
             guard.validate_installed(desired)
+
+
+@pytest.mark.parametrize(
+    ("flags", "timeout"),
+    [
+        (["timeout"], 15),
+        (["timeout", "dynamic"], 15_000),
+        (["dynamic", "timeout"], 15_000_000),
+        (["timeout", "dynamic"], 15_000_000_000),
+        (["timeout"], "15000 ms"),
+        (["dynamic", "timeout"], "15 seconds"),
+    ],
+)
+def test_netguard_accepts_equivalent_nft_set_metadata_encodings(
+    tmp_path, monkeypatch, flags, timeout
+):
+    """libnftables versions differ in flag echoing and duration units."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    for item in installed:
+        nft_set = item.get("set")
+        if nft_set:
+            nft_set["flags"] = flags
+            nft_set["timeout"] = timeout
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])
+
+
+@pytest.mark.parametrize(
+    ("flags", "timeout"),
+    [
+        ([], 15),
+        (["dynamic"], 15),
+        (["timeout", "interval"], 15),
+        (["timeout"], 14),
+        (["timeout"], "forever"),
+    ],
+)
+def test_netguard_rejects_non_equivalent_nft_set_metadata(
+    tmp_path, monkeypatch, flags, timeout
+):
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    first_set = next(item["set"] for item in installed if item.get("set"))
+    first_set["flags"] = flags
+    first_set["timeout"] = timeout
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    with pytest.raises(guard.InstalledMismatch):
+        guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])

@@ -38,6 +38,7 @@ sed '$d' "$ROOT/install.sh" >"$tmp/installer-functions.sh"
 PATH="$tmp/bin:$PATH" \
 NODELITE_TEST_CALLS="$tmp/calls" \
 NODELITE_TEST_PAYLOAD="$tmp/payload" \
+sudo --preserve-env=PATH,NODELITE_TEST_CALLS,NODELITE_TEST_PAYLOAD \
 bash -c '
   set -Eeuo pipefail
   source "$1"

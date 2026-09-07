@@ -23,7 +23,7 @@ chmod +x "$tmp/bin/curl"
 
 # Source function definitions without executing the installer main dispatch.
 sed '$d' "$ROOT/install.sh" >"$tmp/functions.sh"
-tag="$(PATH="$tmp/bin:$PATH" NODELITE_TEST_CURL_LOG="$tmp/curl.log" bash -c 'source "$1"; latest_tag' bash "$tmp/functions.sh")"
+tag="$(PATH="$tmp/bin:$PATH" NODELITE_TEST_CURL_LOG="$tmp/curl.log" sudo --preserve-env=PATH,NODELITE_TEST_CURL_LOG bash -c 'source "$1"; latest_tag' bash "$tmp/functions.sh")"
 [[ "$tag" == v0.3.16-native ]]
 grep -q 'releases/latest?nodelite=' "$tmp/curl.log"
 grep -q 'Cache-Control: no-cache' "$tmp/curl.log"

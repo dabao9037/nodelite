@@ -57,7 +57,14 @@ for arg in "$@"; do
 done
 if [ -n "$output" ]; then
   case "$url" in
-    file://*) cp "${url#file://}" "$output" ;;
+    file://*)
+      path=${url#file://}
+      # The real installer adds a cache-busting query string. HTTP servers do
+      # not include it in the filesystem path, so make this file:// fixture
+      # emulate the same URL semantics.
+      path=${path%%\?*}
+      cp "$path" "$output"
+      ;;
     *) printf 'unexpected download URL: %s\n' "$url" >&2; exit 1 ;;
   esac
 else

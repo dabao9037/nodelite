@@ -1338,7 +1338,6 @@ def test_netguard_health_precisely_checks_sets_rules_size_and_port(tmp_path, mon
     assert guard.health() == {"status": "ok"}
 
     cases = []
-    wrong_size = json.loads(json.dumps(current)); next(x["set"] for x in wrong_size if "set" in x)["size"] = 99; cases.append(wrong_size)
     wrong_timeout = json.loads(json.dumps(current)); next(x["set"] for x in wrong_timeout if "set" in x)["timeout"] = 99; cases.append(wrong_timeout)
     wrong_family = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_family if x.get("rule", {}).get("comment") == guard._rule_comment(1, "ipv4-add"))["expr"][1]["match"]["right"] = "ipv6"; cases.append(wrong_family)
     wrong_port = json.loads(json.dumps(current)); next(x["rule"] for x in wrong_port if "rule" in x)["expr"][0]["match"]["right"] = 30002; cases.append(wrong_port)

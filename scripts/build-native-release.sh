@@ -91,6 +91,13 @@ printf '%s\n' "${NODELITE_GLIBC_MAX:-2.31}" > "$PKG/GLIBC_MAX"
 printf '%s\n' "${NODELITE_RELEASE_TAG:-${GITHUB_REF_NAME:-dev}}" > "$PKG/VERSION"
 printf '%s\n' "${GITHUB_SHA:-local}" > "$PKG/BUILD_COMMIT"
 
+# A "dev" VERSION ships a package the installer will reject with a version
+# mismatch. Fail the build instead of publishing an uninstallable asset.
+if [[ "$(cat "$PKG/VERSION")" == "dev" && -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "refusing to build release package with VERSION=dev" >&2
+  exit 66
+fi
+
 # Validate the exact package before compression.
 test -x "$PKG/bin/nodelite-panel"
 test -x "$PKG/bin/nodelite-gateway"

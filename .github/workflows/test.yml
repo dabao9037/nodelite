@@ -94,6 +94,14 @@ jobs:
           assert 'verify-published-release:' in workflow
           assert 'curl -fL --retry 5' in workflow
           assert 'PUBLIC_NATIVE_RELEASE_VERIFIED' in workflow
+
+          # The release tag must reach the container build, otherwise VERSION
+          # is "dev" and the installer rejects the published package.
+          container = Path('scripts/build-native-release-container.sh').read_text()
+          assert 'NODELITE_RELEASE_TAG="$RELEASE_TAG"' in container
+          assert 'GITHUB_REF_NAME="$RELEASE_TAG"' in container
+          build = Path('scripts/build-native-release.sh').read_text()
+          assert 'refusing to build release package with VERSION=dev' in build
           PY
 
   publish-images:

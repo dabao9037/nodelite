@@ -51,6 +51,27 @@ SIGNING_SECRET = os.getenv("APP_" + "SECRET", "")
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
 BACKGROUND_INTERVAL = max(1.0, float(os.getenv("BACKGROUND_INTERVAL_SECONDS", "2")))
 
+
+def _reserved_panel_ports() -> set[int]:
+    """Ports that must never be handed to a node.
+
+    netguard rejects traffic on a node port once its device limit is full. If a
+    node ever shares the panel's public or internal port, filling that node's
+    limit takes the panel itself offline, so the web UI stops loading.
+    """
+    reserved: set[int] = set()
+    for name in ("LISTEN_PORT", "PANEL_INTERNAL_PORT", "PANEL_PORT"):
+        raw = os.getenv(name, "").strip()
+        if not raw.isdigit():
+            continue
+        value = int(raw)
+        if 1 <= value <= 65535:
+            reserved.add(value)
+    return reserved
+
+
+RESERVED_PORTS = _reserved_panel_ports()
+
 if RUNTIME_BACKEND == "native":
     # The native process neither imports nor connects to Docker.
     docker = None
@@ -594,6 +615,7 @@ def active_connections(ports: list[int]) -> dict[int, int]:
 def free_port():
     with closing(connect_db()) as conn:
         used = {row[0] for row in conn.execute("SELECT port FROM nodes")}
+    used |= RESERVED_PORTS
     for _ in range(300):
         port = 20000 + secrets.randbelow(30000)
         if port in used:
@@ -1262,6 +1284,8 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         raise HTTPException(422, "节点名称不能为空")
     expires_at = resolve_expiration(payload, creating=True)
     port = payload.port or free_port()
+    if port in RESERVED_PORTS:
+        raise HTTPException(422, "该端口为管理面板端口，不能用于节点")
     if protocol == "socks":
         cfg = {
             "username": (payload.username or f"user{1000 + secrets.randbelow(9000)}").strip(),

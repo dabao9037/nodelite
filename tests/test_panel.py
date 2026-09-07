@@ -1589,3 +1589,55 @@ def test_netguard_rejects_non_equivalent_nft_set_metadata(
     monkeypatch.setattr(guard, "_nft_json", lambda: installed)
     with pytest.raises(guard.InstalledMismatch):
         guard.validate_installed([(1, 30001, 2), (2, 30002, 3)])
+
+
+def test_panel_never_allocates_its_own_port_to_a_node(tmp_path, monkeypatch):
+    """A node on the panel's port is taken offline by its own device limit."""
+    monkeypatch.setenv("LISTEN_PORT", "34567")
+    monkeypatch.setenv("PANEL_INTERNAL_PORT", "34568")
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "x")
+    monkeypatch.setenv("APP_" + "SECRET", "y")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "ports.db"))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    sys.modules.pop("app.main", None)
+    module = importlib.import_module("app.main")
+    module.init_db()
+    assert module.RESERVED_PORTS == {34567, 34568}
+    monkeypatch.setattr(module.secrets, "randbelow", lambda _n: 14567)
+    with pytest.raises(Exception):
+        # Every candidate resolves to the reserved panel port, so allocation
+        # must fail loudly instead of handing out the panel's own port.
+        module.free_port()
+
+
+def test_create_rejects_node_on_panel_port(tmp_path, monkeypatch):
+    monkeypatch.setenv("LISTEN_PORT", "34567")
+    monkeypatch.setenv("ADMIN_USER", "test-admin")
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "correct-horse")
+    monkeypatch.setenv("APP_" + "SECRET", "test-signing-value")
+    monkeypatch.setenv("RUNTIME_BACKEND", "docker")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "panel.db"))
+    monkeypatch.setenv("XRAY_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    monkeypatch.setenv("BACKGROUND_INTERVAL_SECONDS", "3600")
+    sys.modules.pop("app.main", None)
+    module = importlib.import_module("app.main")
+    module.init_db()
+    monkeypatch.setattr(module, "xray_container", lambda: None)
+    with TestClient(module.app) as client:
+        login(client)
+        response = client.post(
+            "/api/nodes",
+            json={"name": "clash", "protocol": "socks", "port": 34567, "max_devices": 1},
+        )
+        assert response.status_code == 422
+        assert "面板" in response.text
+    module.STOP_EVENT.set()
+
+
+def test_netguard_skips_rules_for_the_panel_port(tmp_path, monkeypatch):
+    """An already stored conflicting node must not reject the panel's port."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    assert guard.desired_rules(now=20) == [(1, 30001, 2)]
+    monkeypatch.setattr(guard, "PROTECTED_PORTS", {30001})
+    assert guard.desired_rules(now=20) == []

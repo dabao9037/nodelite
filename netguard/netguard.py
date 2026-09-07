@@ -43,6 +43,27 @@ RULE_ROLES = (
 )
 
 
+def _protected_ports() -> set[int]:
+    """Panel ports that must never receive a device-limit reject rule.
+
+    A node sharing the panel's port would otherwise take the web UI offline as
+    soon as that node's device limit filled up. The panel refuses to allocate
+    such a port, but an already stored node must not break the panel either.
+    """
+    ports: set[int] = set()
+    for name in ("NETGUARD_PROTECTED_PORTS", "LISTEN_PORT", "PANEL_INTERNAL_PORT", "PANEL_PORT"):
+        for chunk in os.getenv(name, "").replace(",", " ").split():
+            if not chunk.isdigit():
+                continue
+            value = int(chunk)
+            if 1 <= value <= 65535:
+                ports.add(value)
+    return ports
+
+
+PROTECTED_PORTS = _protected_ports()
+
+
 class TableMissing(RuntimeError):
     """The private nftables table has not been installed yet."""
 
@@ -101,7 +122,8 @@ def desired_rules(now: int | None = None) -> list[tuple[int, int, int]]:
                AND (expires_at IS NULL OR expires_at>?) ORDER BY id""",
             (now,),
         ).fetchall()
-        return [(int(row[0]), int(row[1]), int(row[2])) for row in rows]
+        return [(int(row[0]), int(row[1]), int(row[2])) for row in rows
+                if int(row[1]) not in PROTECTED_PORTS]
     finally:
         connection.close()
 

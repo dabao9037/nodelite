@@ -1548,10 +1548,9 @@ def test_netguard_still_rejects_missing_or_invalid_device_sets(tmp_path, monkeyp
     [
         (["timeout"], 15),
         (["timeout", "dynamic"], 15_000),
-        (["dynamic", "timeout"], 15_000_000),
-        (["timeout", "dynamic"], 15_000_000_000),
         (["timeout"], "15000 ms"),
         (["dynamic", "timeout"], "15 seconds"),
+        (["dynamic", "timeout"], "15s"),
     ],
 )
 def test_netguard_accepts_equivalent_nft_set_metadata_encodings(

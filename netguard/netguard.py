@@ -452,19 +452,17 @@ def _set_timeout_seconds(value) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        # JSON duration units changed across libnftables generations and
-        # distro backports: seconds, milliseconds, microseconds and
-        # nanoseconds have all been observed. Only accept an exact rendering
-        # of our configured timeout so a genuinely different timeout cannot
-        # be mistaken for a unit conversion.
-        for multiplier in (1, 1_000, 1_000_000, 1_000_000_000):
+        # Real nft JSON has been observed using seconds and milliseconds.
+        # Only accept an exact rendering of our configured timeout so a
+        # genuinely different timeout cannot be mistaken for a conversion.
+        for multiplier in (1, 1_000):
             if value == DEVICE_TIMEOUT_SECONDS * multiplier:
                 return DEVICE_TIMEOUT_SECONDS
         return None
     if not isinstance(value, str):
         return None
     matched = re.fullmatch(
-        r"(\d+)\s*(ns|nsec(?:ond)?s?|us|usec(?:ond)?s?|µs|ms|msec(?:ond)?s?|s|sec(?:ond)?s?)?",
+        r"(\d+)\s*(ms|msec(?:ond)?s?|s|sec(?:ond)?s?)?",
         value.strip().lower(),
     )
     if not matched:
@@ -481,15 +479,6 @@ def _set_timeout_seconds(value) -> int | None:
         "msec": 1_000,
         "msecond": 1_000,
         "mseconds": 1_000,
-        "us": 1_000_000,
-        "µs": 1_000_000,
-        "usec": 1_000_000,
-        "usecond": 1_000_000,
-        "useconds": 1_000_000,
-        "ns": 1_000_000_000,
-        "nsec": 1_000_000_000,
-        "nsecond": 1_000_000_000,
-        "nseconds": 1_000_000_000,
     }.get(unit)
     if divisor is None or amount != DEVICE_TIMEOUT_SECONDS * divisor:
         return None
@@ -544,12 +533,12 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
             or _set_timeout_seconds(nft_set.get("timeout")) != DEVICE_TIMEOUT_SECONDS
         ):
             raise InstalledMismatch(f"invalid nftables set for node {node_id}")
-        # `size` is optional in libnftables JSON and some kernel/nft versions
-        # omit it or rewrite the requested limit. Inventory and rule validation
-        # below are authoritative; if size is present, only reject invalid
-        # non-positive values rather than comparing a lossy display field.
+        # The set size is the actual per-family admission capacity. Every nft
+        # version in the compatibility matrix reports it faithfully, so a
+        # missing or rewritten value cannot prove that the requested limit is
+        # installed and must fail closed.
         size = nft_set.get("size")
-        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size <= 0):
+        if isinstance(size, bool) or not isinstance(size, int) or size != expected[node_id][1]:
             raise InstalledMismatch(f"invalid nftables set size for node {node_id}")
         actual_sets.add((node_id, family))
     expected_sets = {

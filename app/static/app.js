@@ -178,7 +178,8 @@ const REALITY_PRESETS = new Set([
   'www.animatetimes.com', 'www.famitsu.com',
   'www.a-star.edu.sg', 'www.visitsingapore.com',
   'www.cern.ch', 'www.gog.com',
-  'www.hkstp.org', 'www.discoverhongkong.com'
+  'www.hkstp.org', 'www.discoverhongkong.com',
+  'www.visitdubai.com', 'www.dubaiairports.ae'
 ]);
 
 function updateShadowsocksMethod() {

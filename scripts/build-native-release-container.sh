@@ -40,4 +40,14 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc 'set -e; apt-get update -qq || true; apt-get install -o Acquire::http::Dl-Limit=70 -o Acquire::https::Dl-Limit=70 -o Acquire::Retries=3 -o APT::Get::AllowUnauthenticated=true -y gcc binutils patchelf curl ca-certificates && /src/scripts/build-native-release.sh "'"$ARCH"'"'
+  bash -lc '
+set -e
+# Install packages from base image packages if available, ignore errors
+apt-get update -qq 2>/dev/null || true
+apt-get install -y gcc binutils patchelf curl ca-certificates 2>/dev/null || true
+# Verify essential tools exist (Python comes from base image)
+for tool in gcc patchelf curl python3; do
+  command -v $tool >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
+done
+/src/scripts/build-native-release.sh "'"$ARCH"'"
+'

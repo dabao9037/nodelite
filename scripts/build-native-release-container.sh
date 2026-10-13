@@ -8,11 +8,12 @@ PLATFORM=""
 
 case "$ARCH" in
   amd64)
-    IMAGE="${IMAGE:-python:3.11-slim-bullseye}"
+    # Use manylinux image which has pre-installed build tools
+    IMAGE="${IMAGE:-quay.io/pypa/manylinux_2_28_x86_64}"
     PLATFORM=linux/amd64
     ;;
   arm64)
-    IMAGE="${IMAGE:-python:3.11-slim-bullseye}"
+    IMAGE="${IMAGE:-quay.io/pypa/manylinux_2_28_aarch64}"
     PLATFORM=linux/arm64
     ;;
   *)
@@ -40,4 +41,4 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc 'apt-get update && apt-get install -y gcc binutils patchelf curl ca-certificates && /src/scripts/build-native-release.sh "'"$ARCH"'"'
+  bash -lc '/src/scripts/build-native-release.sh "'"$ARCH"'"'

@@ -40,4 +40,4 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc 'set -e; rm -rf /var/lib/apt/lists/*; for i in 1 2 3; do apt-get update -qq && apt-get install -y -qq --no-install-recommends --allow-unauthenticated gcc binutils patchelf curl ca-certificates 2>/dev/null && break || sleep 5; done; /src/scripts/build-native-release.sh "'"$ARCH"'"'
+  bash -lc 'set -e; apt-get update -qq || true; apt-get install -o Acquire::http::Dl-Limit=70 -o Acquire::https::Dl-Limit=70 -o Acquire::Retries=3 -o APT::Get::AllowUnauthenticated=true -y gcc binutils patchelf curl ca-certificates && /src/scripts/build-native-release.sh "'"$ARCH"'"'

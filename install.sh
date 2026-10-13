@@ -443,7 +443,8 @@ confirm_network_change() {
 }
 
 apply_managed_sysctl() {
-  local name="$1" content="$2" rollback="$3" file="$SYSCTL_DIR/$name" apply_file rollback_file backup=""
+  local name="$1" content="$2" rollback="$3" file apply_file rollback_file backup=""
+  file="$SYSCTL_DIR/$name"
   mkdir -p "$SYSCTL_DIR"
   apply_file="$(mktemp "$SYSCTL_DIR/.nodelite-apply.XXXXXX")"
   rollback_file="$(mktemp "$SYSCTL_DIR/.nodelite-rollback.XXXXXX")"
@@ -559,14 +560,14 @@ menu() {
   7. 重启 NodeLite
   8. TCPFit 网络调优（第三方）
   9. IP检测（IPv4质量检测）
- 10. 一键关闭 IPv6
- 11. 一键开启 BBR
+ 10. 一键开启 BBR
+ 11. 一键关闭 IPv6
  12. 卸载 NodeLite
  13. 可选 Docker 兼容安装
   0. 退出
 ===================================================
 EOF
-  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) disable_ipv6;; 11) enable_bbr_fq;; 12) uninstall_nodelite;; 13) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
 command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|uninstall|docker|menu]";; esac

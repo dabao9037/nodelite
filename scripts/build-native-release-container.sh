@@ -8,11 +8,11 @@ PLATFORM=""
 
 case "$ARCH" in
   amd64)
-    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
+    IMAGE="${IMAGE:-python:3.12-slim-bookworm}"
     PLATFORM=linux/amd64
     ;;
   arm64)
-    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
+    IMAGE="${IMAGE:-python:3.12-slim-bookworm}"
     PLATFORM=linux/arm64
     ;;
   *)
@@ -36,7 +36,7 @@ docker run --rm --platform "$PLATFORM" \
   -e GITHUB_SHA="${GITHUB_SHA:-local}" \
   -e NODELITE_RELEASE_TAG="$RELEASE_TAG" \
   -e GITHUB_REF_NAME="$RELEASE_TAG" \
-  -e NODELITE_GLIBC_MAX="${NODELITE_GLIBC_MAX:-2.31}" \
+  -e NODELITE_GLIBC_MAX="${NODELITE_GLIBC_MAX:-2.36}" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \

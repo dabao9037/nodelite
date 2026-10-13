@@ -224,6 +224,8 @@ write_environment() {
 RUNTIME_BACKEND=native
 NODELITE_HOME=$INSTALL_DIR
 DB_PATH=$INSTALL_DIR/data/panel.db
+NETGUARD_DB_PATH=/var/lib/nodelite/netguard.db
+NETGUARD_DB_IMMUTABLE=1
 XRAY_CONFIG_PATH=$INSTALL_DIR/xray-config/config.json
 PUBLIC_HOST=$host
 ADMIN_USER=$user

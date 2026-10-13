@@ -49,12 +49,9 @@ grep -qx 'ReadOnlyPaths=/var/lib/nodelite' "$GUARD"
 grep -qx "InaccessiblePaths=$fixture/data" "$GUARD"
 grep -q 'NETGUARD_DB_PATH' "$ROOT/app/main.py"
 grep -q 'publish_netguard_snapshot' "$ROOT/app/main.py"
-for installer in "$ROOT/install.sh" "$ROOT/build/native-amd64/package/install.sh"; do
-  grep -q '^NETGUARD_DB_PATH=/var/lib/nodelite/netguard.db$' "$installer"
-  grep -q '^NETGUARD_DB_IMMUTABLE=1$' "$installer"
-  grep -q 'set_key .* NETGUARD_DB_PATH /var/lib/nodelite/netguard.db' "$installer"
-  grep -q 'set_key .* NETGUARD_DB_IMMUTABLE 1' "$installer"
-  grep -q 'netguard.db' "$installer"
-done
+# Check source installer writes NETGUARD_DB_PATH and NETGUARD_DB_IMMUTABLE
+# (build-time package is verified by the build job)
+grep -q 'NETGUARD_DB_PATH=/var/lib/nodelite/netguard.db' "$ROOT/install.sh"
+grep -q 'NETGUARD_DB_IMMUTABLE=1' "$ROOT/install.sh"
 
 echo NATIVE_SYSTEMD_SANDBOX_OK

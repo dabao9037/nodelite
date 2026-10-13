@@ -40,4 +40,4 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc 'apt-get update -qq && apt-get install -y -qq --no-install-recommends --fix-missing gcc binutils patchelf curl ca-certificates >/dev/null && /src/scripts/build-native-release.sh "'"$ARCH"'"'
+  bash -lc 'rm -rf /var/lib/apt/lists/* && apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc binutils patchelf curl ca-certificates >/dev/null && /src/scripts/build-native-release.sh "'"$ARCH"'"'

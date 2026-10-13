@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Administrative tools such as nft, ip and sysctl live in sbin. A root shell
-# started without a login profile (su, cron, some CI/agents) may omit those
-# directories, which previously aborted installation with "依赖安装后仍找不到命令：nft"
-# even though nftables was installed.
-for _dir in /usr/local/sbin /usr/sbin /sbin; do
-  case ":$PATH:" in *":$_dir:"*) ;; *) [[ -d "$_dir" ]] && PATH="$PATH:$_dir" ;; esac
-done
-unset _dir
-export PATH
-
 REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
 BIN_DIR="${NODELITE_BIN_DIR:-/usr/local/bin}"
-SYSCTL_DIR="${NODELITE_SYSCTL_DIR:-/etc/sysctl.d}"
-MODULES_LOAD_DIR="${NODELITE_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 INTERNAL_PORT=18080
 PASSWORD_KEY="ADMIN_""PASSWORD"
 SECRET_KEY="APP_""SECRET"
@@ -48,127 +36,20 @@ service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"
 
 ensure_tools() {
   local missing=() packages=() cmd
-  for cmd in curl tar openssl nft ip python3; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
+  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
   ((${#missing[@]} == 0)) && return
   warn "仅安装缺失的基础工具：${missing[*]}"
   if command -v apt-get >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute2);; nft) packages+=(nftables);; python3) packages+=(python3);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute2);; *) packages+=("$cmd");; esac; done
     apt-get update && apt-get install -y ca-certificates "${packages[@]}"
   elif command -v dnf >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; nft) packages+=(nftables);; python3) packages+=(python3);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
     dnf install -y ca-certificates "${packages[@]}"
   elif command -v yum >/dev/null; then
-    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; nft) packages+=(nftables);; python3) packages+=(python3);; *) packages+=("$cmd");; esac; done
+    for cmd in "${missing[@]}"; do case "$cmd" in ip) packages+=(iproute);; *) packages+=("$cmd");; esac; done
     yum install -y ca-certificates "${packages[@]}"
-  else die "请先安装 curl、tar、openssl、nftables、iproute2/iproute 和 python3"; fi
-  for cmd in curl tar openssl nft ip python3; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
-}
-
-ensure_network_tools() {
-  local missing=() cmd
-  for cmd in sysctl; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
-  ((${#missing[@]} == 0)) && return
-  warn "安装网络设置所需工具：${missing[*]}"
-  if command -v apt-get >/dev/null; then
-    apt-get update && apt-get install -y procps kmod
-  elif command -v dnf >/dev/null; then
-    dnf install -y procps-ng kmod
-  elif command -v yum >/dev/null; then
-    yum install -y procps-ng kmod
-  else
-    die "请先安装 sysctl（procps/procps-ng）"
-  fi
-  command -v sysctl >/dev/null 2>&1 || die "安装后仍找不到 sysctl"
-}
-
-confirm_network_change() {
-  [[ "${NODELITE_ASSUME_YES:-0}" == 1 ]] && return 0
-  local prompt="$1" answer
-  read -r -p "$prompt [y/N]: " answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { warn "已取消"; return 1; }
-}
-
-apply_managed_sysctl() {
-  local name="$1" content="$2" rollback="$3" file apply_file rollback_file backup=""
-  file="$SYSCTL_DIR/$name"
-  mkdir -p "$SYSCTL_DIR"
-  apply_file="$(mktemp "$SYSCTL_DIR/.nodelite-apply.XXXXXX")"
-  rollback_file="$(mktemp "$SYSCTL_DIR/.nodelite-rollback.XXXXXX")"
-  printf '%s\n' "$content" >"$apply_file"
-  printf '%s\n' "$rollback" >"$rollback_file"
-  chmod 0644 "$apply_file" "$rollback_file"
-  if ! sysctl -p "$apply_file" >/dev/null; then
-    sysctl -p "$rollback_file" >/dev/null 2>&1 || true
-    rm -f "$apply_file" "$rollback_file"
-    die "应用内核网络设置失败，运行时设置已回滚"
-  fi
-  if [[ -f "$file" ]] && cmp -s "$apply_file" "$file"; then
-    rm -f "$apply_file" "$rollback_file"
-    return 0
-  fi
-  if [[ -f "$file" ]]; then
-    backup="$file.bak.$(date +%Y%m%d%H%M%S)"
-    cp -a "$file" "$backup"
-  fi
-  if ! mv -f "$apply_file" "$file"; then
-    sysctl -p "$rollback_file" >/dev/null 2>&1 || true
-    [[ -z "$backup" ]] || cp -a "$backup" "$file"
-    rm -f "$apply_file" "$rollback_file"
-    die "持久化内核网络设置失败，运行时设置已回滚"
-  fi
-  chmod 0644 "$file"
-  rm -f "$rollback_file"
-}
-
-persist_bbr_modules() {
-  local file="$MODULES_LOAD_DIR/nodelite-bbr.conf" tmp
-  mkdir -p "$MODULES_LOAD_DIR"
-  tmp="$(mktemp "$MODULES_LOAD_DIR/.nodelite-bbr.XXXXXX")"
-  printf 'tcp_bbr\nsch_fq\n' >"$tmp"
-  chmod 0644 "$tmp"
-  if [[ -f "$file" ]] && cmp -s "$tmp" "$file"; then rm -f "$tmp"; else mv -f "$tmp" "$file"; fi
-}
-
-disable_ipv6() {
-  cat <<'EOF'
-关闭 IPv6 会立即影响现有 IPv6 连接；如果当前 SSH 走 IPv6，连接可能中断。
-设置会写入独立的 NodeLite sysctl 文件并持久生效，不改动其他 sysctl 文件。
-EOF
-  confirm_network_change "确认一键关闭 IPv6？" || return 0
-  ensure_network_tools
-  local old_all old_default
-  old_all="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || die "当前系统不支持或不允许修改 IPv6 sysctl"
-  old_default="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || die "当前系统不支持或不允许修改 IPv6 sysctl"
-  apply_managed_sysctl "99-zz-nodelite-disable-ipv6.conf" "# Managed by NodeLite
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1" "net.ipv6.conf.all.disable_ipv6 = $old_all
-net.ipv6.conf.default.disable_ipv6 = $old_default"
-  [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == 1 ]] || die "IPv6 全局关闭校验失败"
-  [[ "$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" == 1 ]] || die "IPv6 默认关闭校验失败"
-  ok "IPv6 已关闭，并已持久化到 $SYSCTL_DIR/99-zz-nodelite-disable-ipv6.conf"
-}
-
-enable_bbr_fq() {
-  cat <<'EOF'
-将启用 Linux BBR TCP 拥塞控制和 fq 默认队列规则，并写入独立的持久化 sysctl 文件。
-此操作不会改动 NodeLite 节点、端口或登录配置。
-EOF
-  confirm_network_change "确认一键开启 BBR + fq？" || return 0
-  ensure_network_tools
-  local old_qdisc old_cc available
-  old_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null)" || die "无法读取默认队列规则"
-  old_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" || die "无法读取当前 TCP 拥塞控制算法"
-  command -v modprobe >/dev/null 2>&1 && { modprobe tcp_bbr 2>/dev/null || true; modprobe sch_fq 2>/dev/null || true; }
-  available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-  [[ " $available " == *" bbr "* ]] || die "当前内核不支持 BBR；可用算法：${available:-未知}"
-  apply_managed_sysctl "99-zz-nodelite-bbr-fq.conf" "# Managed by NodeLite
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr" "net.core.default_qdisc = $old_qdisc
-net.ipv4.tcp_congestion_control = $old_cc"
-  [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" == fq ]] || die "fq 启用校验失败"
-  [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == bbr ]] || die "BBR 启用校验失败"
-  persist_bbr_modules
-  ok "BBR + fq 已开启，并已持久化到 $SYSCTL_DIR/99-zz-nodelite-bbr-fq.conf"
+  else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
+  for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
 }
 
 ensure_git() {
@@ -212,66 +93,9 @@ validate_release_compatibility() {
 }
 latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
-  local attempt payload tag url
-  for attempt in 1 2 3 4 5; do
-    url="https://api.github.com/repos/$REPO/releases/latest?nodelite=$(date +%s)-$attempt-$RANDOM"
-    payload="$(curl -fsSL \
-      --connect-timeout 15 --max-time 60 \
-      --retry 3 --retry-all-errors --retry-delay 2 \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-      "$url" 2>/dev/null || true)"
-    tag="$(printf '%s' "$payload" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-native$ ]]; then
-      printf '%s\n' "$tag"
-      return 0
-    fi
-    sleep $((attempt * 2))
-  done
-  return 1
-}
-
-download_native_asset() {
-  local tag="$1" arch="$2" destination="$3"
-  local asset="nodelite-linux-$arch.tar.gz"
-  local base_url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/$asset}"
-  local attempt delay cache_bust url
-
-  # GitHub may publish the Release object before every CDN edge can serve its
-  # newly-attached asset. A user's first menu-1 update must therefore tolerate
-  # transient 404/5xx responses instead of exiting after one request.
-  for attempt in 1 2 3 4 5 6; do
-    cache_bust="nodelite=$(date +%s)-$attempt-$RANDOM"
-    url="$base_url"
-    [[ "$url" == *\?* ]] && url="$url&$cache_bust" || url="$url?$cache_bust"
-    if curl -fL \
-      --connect-timeout 15 --max-time 600 \
-      --retry 3 --retry-all-errors --retry-delay 2 \
-      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-      "$url" -o "$destination"; then
-      [[ -s "$destination" ]] || die "下载到的原生发行包为空"
-      return 0
-    fi
-    rm -f "$destination"
-    delay=$((attempt * 5))
-    warn "发行包暂时不可用，${delay} 秒后重试（$attempt/6）"
-    sleep "$delay"
-  done
-  die "原生发行包连续重试后仍无法下载：$base_url"
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
-
-installed_version() {
-  local version commit
-  version="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)"
-  commit="$(cat "$INSTALL_DIR/BUILD_COMMIT" 2>/dev/null || true)"
-  [[ -n "$version" ]] || version="未知"
-  if [[ "$commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-    printf '%s (%s)' "$version" "${commit:0:7}"
-  else
-    printf '%s' "$version"
-  fi
-}
 
 save_installer() {
   local destination="$1" source="${BASH_SOURCE[0]:-}"
@@ -400,8 +224,6 @@ write_environment() {
 RUNTIME_BACKEND=native
 NODELITE_HOME=$INSTALL_DIR
 DB_PATH=$INSTALL_DIR/data/panel.db
-NETGUARD_DB_PATH=/var/lib/nodelite/netguard.db
-NETGUARD_DB_IMMUTABLE=1
 XRAY_CONFIG_PATH=$INSTALL_DIR/xray-config/config.json
 PUBLIC_HOST=$host
 ADMIN_USER=$user
@@ -420,44 +242,6 @@ EOF
   chmod 600 "$INSTALL_DIR/config/nodelite.env"
 }
 
-repair_native_permissions() {
-  mkdir -p "$INSTALL_DIR/data" /var/lib/nodelite /run/nodelite
-  chown root:root "$INSTALL_DIR/data" /var/lib/nodelite /run/nodelite
-  chmod 0700 "$INSTALL_DIR/data"
-  chmod 0750 /var/lib/nodelite
-  chmod 0770 /run/nodelite
-  command -v python3 >/dev/null 2>&1 || die "原生模式需要 python3 以初始化 netguard 数据库快照"
-  python3 - "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db <<'PY'
-import os
-import sqlite3
-import sys
-
-live, snapshot = sys.argv[1:]
-os.makedirs(os.path.dirname(live), exist_ok=True)
-os.makedirs(os.path.dirname(snapshot), exist_ok=True)
-with sqlite3.connect(live) as db:
-    # The panel owns the live schema. Creating even a placeholder `nodes` table
-    # here is destructive: the panel uses CREATE TABLE IF NOT EXISTS, so a stub
-    # table silently suppresses the real schema and every node insert then fails
-    # with "table nodes has no column named name". netguard tolerates a snapshot
-    # whose nodes table is missing or lacks the device-limit columns, so publish
-    # the live database as-is.
-    temporary = snapshot + ".tmp"
-    try:
-        os.unlink(temporary)
-    except FileNotFoundError:
-        pass
-    with sqlite3.connect(temporary) as target:
-        db.backup(target)
-    os.chmod(temporary, 0o640)
-    os.replace(temporary, snapshot)
-PY
-  chown root:root "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db
-  chmod 0640 "$INSTALL_DIR/data/panel.db" /var/lib/nodelite/netguard.db
-  set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_PATH /var/lib/nodelite/netguard.db
-  set_key "$INSTALL_DIR/config/nodelite.env" NETGUARD_DB_IMMUTABLE 1
-}
-
 install_units() {
   mkdir -p "$SYSTEMD_DIR"
   local unit installed temporary
@@ -471,7 +255,6 @@ install_units() {
     install -m 0644 "$temporary" "$installed"
     rm -f "$temporary"
   done
-  repair_native_permissions
   service_ctl daemon-reload
   service_ctl enable "${SERVICES[@]}"
 }
@@ -562,25 +345,17 @@ install_or_update() {
   secret="${!SECRET_KEY:-$(read_key "$old" "$SECRET_KEY")}"; secret="${secret:-$(random_secret)}"
   old_internal="$(read_key "$old" PANEL_INTERNAL_PORT)"
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
-  info "下载原生发行包：$url"
-  download_native_asset "$tag" "$arch" "$tmp/release.tar.gz"
+  info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
   release_dir="$tmp/release"; backup_dir="$tmp/runtime-state"
   mkdir -p "$release_dir"
   tar -xzf "$tmp/release.tar.gz" -C "$release_dir"
   validate_release_compatibility "$release_dir" "$arch"
-  [[ "$(cat "$release_dir/VERSION" 2>/dev/null || true)" == "$tag" ]] || die "发行包版本与 Release 不匹配：需要 $tag"
   backup_runtime_state "$backup_dir"
   stop_legacy_docker
   stop_native_for_upgrade
   preflight_port "$port"
   choose_internal_port "$old_internal"
   install_release_code "$release_dir"
-  [[ -s "$INSTALL_DIR/VERSION" ]] || die "安装后的版本文件缺失；拒绝报告更新成功"
-  [[ "$(cat "$INSTALL_DIR/VERSION")" == "$tag" ]] || \
-    die "安装后版本不匹配：期望 $tag，实际 $(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo 未知)"
-  [[ -s "$INSTALL_DIR/BUILD_COMMIT" ]] || die "安装后的构建提交标记缺失；拒绝报告更新成功"
-  cmp -s "$INSTALL_DIR/install.sh" "$release_dir/install.sh" || \
-    die "安装后的管理脚本不是本次发行包版本；拒绝报告更新成功"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'
@@ -588,12 +363,8 @@ install_or_update() {
 JSON
   fi
   install_units
-  # Clear start-limit counters left by earlier failed starts, otherwise systemd
-  # refuses to start and reports "attempted too often".
-  service_ctl reset-failed "${SERVICES[@]}" || true
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
-  [[ "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)" == "$tag" ]] || die "安装后版本校验失败：需要 $tag，实际 $(installed_version)"
-  wait_healthy; ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
+  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
@@ -615,6 +386,28 @@ install_docker_mode() {
   local dir="${NODELITE_DOCKER_DIR:-/opt/nodelite-docker}"
   [[ -d "$dir/.git" ]] && { git -C "$dir" fetch origin main; git -C "$dir" reset --hard origin/main; } || git clone "https://github.com/$REPO.git" "$dir"
   (cd "$dir" && NODELITE_DIR="$dir" bash install-docker.sh install)
+}
+
+run_ip_check() {
+  clear
+  cat <<'EOF'
+=== IP质量检测 - 仅IPv4 ===
+
+正在运行 IP 质量检测脚本（仅 IPv4）...
+------------------------------------------------
+
+EOF
+  if bash <(curl -fsSL "https://IP.Check.Place") -4; then
+    echo ""
+    echo "------------------------------------------------"
+    ok "IP 检测完成"
+  else
+    echo ""
+    echo "------------------------------------------------"
+    warn "脚本执行失败"
+  fi
+  echo ""
+  read -r -p "按 Enter 键继续..."
 }
 
 run_tcpfit() {
@@ -640,7 +433,7 @@ uninstall_nodelite() {
 }
 
 menu() {
-  while true; do printf '\n当前版本：%s\n' "$(installed_version)"; cat <<'EOF'
+  while true; do cat <<'EOF'
 
 ============== NodeLite 原生管理菜单 ==============
   1. 安装 / 更新（默认原生 systemd）
@@ -651,14 +444,13 @@ menu() {
   6. 查看状态与访问地址
   7. 重启 NodeLite
   8. TCPFit 网络调优（第三方）
-  9. 卸载 NodeLite
- 10. 可选 Docker 兼容安装
- 11. 一键关闭 IPv6
- 12. 一键开启 BBR + fq
+  9. IP检测（IPv4质量检测）
+ 10. 卸载 NodeLite
+ 11. 可选 Docker 兼容安装
   0. 退出
 ===================================================
 EOF
-  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) uninstall_nodelite;; 10) install_docker_mode;; 11) disable_ipv6;; 12) enable_bbr_fq;; 0) exit;; *) warn "无效选项";; esac; done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) uninstall_nodelite;; 11) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|disable-ipv6|enable-bbr-fq|uninstall|docker|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|uninstall|docker|menu]";; esac

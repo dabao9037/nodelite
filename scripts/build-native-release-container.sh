@@ -8,11 +8,11 @@ PLATFORM=""
 
 case "$ARCH" in
   amd64)
-    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
+    IMAGE="${IMAGE:-python:3.11-slim-bullseye}"
     PLATFORM=linux/amd64
     ;;
   arm64)
-    IMAGE="${IMAGE:-python:3.12-slim-bullseye}"
+    IMAGE="${IMAGE:-python:3.11-slim-bullseye}"
     PLATFORM=linux/arm64
     ;;
   *)
@@ -40,14 +40,4 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT:/src" \
   -w /src \
   "$IMAGE" \
-  bash -lc '
-set -e
-# Install packages from base image packages if available, ignore errors
-apt-get update -qq 2>/dev/null || true
-apt-get install -y gcc binutils patchelf curl ca-certificates 2>/dev/null || true
-# Verify essential tools exist (Python comes from base image)
-for tool in gcc patchelf curl python3; do
-  command -v $tool >/dev/null 2>&1 || { echo "Missing required tool: $tool" >&2; exit 1; }
-done
-/src/scripts/build-native-release.sh "'"$ARCH"'"
-'
+  bash -lc 'apt-get update && apt-get install -y gcc binutils patchelf curl ca-certificates && /src/scripts/build-native-release.sh "'"$ARCH"'"'

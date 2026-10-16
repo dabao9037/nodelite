@@ -16,7 +16,7 @@ backend = (root / "app/main.py").read_text(encoding="utf-8")
 targets_document = json.loads((root / "config/reality-targets.json").read_text(encoding="utf-8"))
 
 groups = targets_document["groups"]
-assert len(groups) == 6
+assert len(groups) == 7
 expected = {target["host"] for group in groups for target in group["targets"]}
 for group in groups:
     label = group["label"].split(" · ", 1)[0]
@@ -24,7 +24,7 @@ for group in groups:
     for target in group["targets"]:
         host = target["host"]
         assert page.count(f'<option value="{host}"') == 1, host
-        assert len(expected) == 12
+        assert len(expected) == 14
 
 methods = [
     "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",

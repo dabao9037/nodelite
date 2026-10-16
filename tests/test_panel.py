@@ -384,6 +384,7 @@ def test_reality_preset_selector_and_custom_fallback(panel):
         "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
         "欧洲": ("www.cern.ch", "www.gog.com"),
         "香港": ("www.hkstp.org", "www.discoverhongkong.com"),
+        "迪拜": ("www.visitdubai.com", "www.dubaiairports.ae"),
     }
     for group, hosts in expected_groups.items():
         assert f'<optgroup label="{group}">' in home.text

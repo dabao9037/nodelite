@@ -6,6 +6,7 @@
     {"label": "日本 · 二次元 / 游戏媒体", "targets": [{"name": "Animate Times", "host": "www.animatetimes.com"}, {"name": "Famitsu", "host": "www.famitsu.com"}]},
     {"label": "东南亚 · 科研机构 / 旅游资讯", "targets": [{"name": "A*STAR", "host": "www.a-star.edu.sg"}, {"name": "Visit Singapore", "host": "www.visitsingapore.com"}]},
     {"label": "欧洲 · 科研 / 游戏平台", "targets": [{"name": "CERN", "host": "www.cern.ch"}, {"name": "GOG", "host": "www.gog.com"}]},
-    {"label": "香港 · 科创园区 / 旅游资讯", "targets": [{"name": "HKSTP", "host": "www.hkstp.org"}, {"name": "Discover Hong Kong", "host": "www.discoverhongkong.com"}]}
+    {"label": "香港 · 科创园区 / 旅游资讯", "targets": [{"name": "HKSTP", "host": "www.hkstp.org"}, {"name": "Discover Hong Kong", "host": "www.discoverhongkong.com"}]},
+    {"label": "迪拜 · 旅游资讯 / 机场", "targets": [{"name": "Visit Dubai", "host": "www.visitdubai.com"}, {"name": "Dubai Airports", "host": "www.dubaiairports.ae"}]}
   ]
 }

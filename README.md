@@ -123,6 +123,7 @@ bash scripts/build-native-release-container.sh amd64
 - 东南亚：A*STAR（新加坡科研）、Visit Singapore（旅游）
 - 欧洲：CERN（瑞士科研）、GOG（波兰游戏平台）
 - 香港：HKSTP（香港科技园）、Discover Hong Kong（旅游）
+- 迪拜：Visit Dubai（迪拜旅游局）、Dubai Airports（迪拜机场）
 - 自定义
 
 候选方向集中在学术研究、旅游、二次元、游戏和小众企业，避免把 Apple、Microsoft、BBC 等大型通用站点作为内置预设。发布前检查 DNS、443、TLS 1.3 和证书主机名匹配；Reality 目标的实际可用性仍受服务器出口与站点策略影响，部署后应使用真实客户端测试。

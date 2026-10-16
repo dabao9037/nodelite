@@ -30,3 +30,6 @@ tmp/
 *.tar.gz
 tlsrg.txt
 toolprobe.txt
+
+# Build outputs
+dist/

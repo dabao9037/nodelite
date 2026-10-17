@@ -55,6 +55,27 @@ function trafficLimitText(node) {
   return `${bytes(node.traffic_used_bytes)} / ${bytes(node.traffic_limit_bytes)}`;
 }
 
+// The subscription URL is built from the URL the admin is using right now
+// (scheme, host, port and random access path), so it always matches the panel.
+const subUrl = node => appUrl(node.sub_path);
+const subQrUrl = node => `${appUrl(node.sub_qr)}?base=${encodeURIComponent(baseUrl.toString())}`;
+const qrViews = new Map();
+
+function qrPanel(node) {
+  const view = qrViews.get(node.id) || 'node';
+  const sub = view === 'sub';
+  const src = sub ? subQrUrl(node) : appUrl(node.qr);
+  const alt = `${node.name} ${sub ? '订阅二维码' : '节点二维码'}`;
+  return `
+      <div class="qr-box">
+        <div class="qr-tabs" role="group" aria-label="${esc(node.name)} 二维码类型">
+          <button type="button" data-qr-view="node" data-qr-node="${node.id}" aria-pressed="${!sub}">节点二维码</button>
+          <button type="button" data-qr-view="sub" data-qr-node="${node.id}" aria-pressed="${sub}">订阅二维码</button>
+        </div>
+        <a class="qr-link" href="${esc(src)}" target="_blank" rel="noopener" title="打开原始${sub ? '订阅' : '节点'}二维码"><img class="qr" src="${esc(src)}" alt="${esc(alt)}" loading="lazy"></a>
+      </div>`;
+}
+
 function render() {
   $('#empty').hidden = nodes.length > 0;
   $('#list').innerHTML = nodes.map(node => `
@@ -77,8 +98,13 @@ function render() {
         <progress class="traffic-progress" data-traffic-progress max="100" value="${Math.min(100, node.traffic_percent || 0)}" ${node.traffic_limit_bytes ? '' : 'hidden'}></progress>
       </div>
       <div class="link"><input readonly aria-label="${esc(node.name)} 分享链接" value="${esc(node.link)}"><button type="button" data-copy="${esc(node.link)}">复制</button></div>
-      <a class="qr-link" href="${esc(appUrl(node.qr))}" target="_blank" rel="noopener" title="打开原始二维码"><img class="qr" src="${esc(appUrl(node.qr))}" alt="${esc(node.name)} 节点二维码" loading="lazy"></a>
-      <div class="actions"><button type="button" data-edit="${node.id}">编辑</button><button type="button" data-toggle="${node.id}" ${node.expired || node.traffic_exceeded ? `disabled title="${node.expired ? '请先编辑有效期' : '请先提高/清除上限或重置流量'}"` : ''}>${node.enabled ? '停用' : '启用'}</button><button type="button" data-traffic-reset="${node.id}">重置流量</button><button type="button" data-delete="${node.id}">删除</button></div>
+      <div class="sub">
+        <label class="sub-label" for="sub-${node.id}">订阅链接</label>
+        <div class="link"><input id="sub-${node.id}" readonly value="${esc(subUrl(node))}" aria-describedby="sub-hint-${node.id}"><button type="button" data-copy="${esc(subUrl(node))}" aria-label="复制 ${esc(node.name)} 订阅链接">复制</button></div>
+        <small id="sub-hint-${node.id}" class="sub-hint">Clash/Mihomo/Stash 用订阅链接；v2rayN/NekoBox/Shadowrocket/Hiddify 两种都能用。${location.protocol === 'https:' ? '' : '<strong>当前为 HTTP，订阅链接等同密码，请勿外泄；泄露后点“重置订阅”。</strong>'}</small>
+      </div>
+${qrPanel(node)}
+      <div class="actions"><button type="button" data-edit="${node.id}">编辑</button><button type="button" data-toggle="${node.id}" ${node.expired || node.traffic_exceeded ? `disabled title="${node.expired ? '请先编辑有效期' : '请先提高/清除上限或重置流量'}"` : ''}>${node.enabled ? '停用' : '启用'}</button><button type="button" data-traffic-reset="${node.id}">重置流量</button><button type="button" data-sub-regenerate="${node.id}" title="生成新订阅链接，旧链接立即失效">重置订阅</button><button type="button" data-delete="${node.id}">删除</button></div>
     </article>
   `).join('');
 }
@@ -277,8 +303,22 @@ $('#list').addEventListener('click', async event => {
   const toggle = event.target.closest('[data-toggle]');
   const reset = event.target.closest('[data-traffic-reset]');
   const remove = event.target.closest('[data-delete]');
+  const qrView = event.target.closest('[data-qr-view]');
+  const regenerate = event.target.closest('[data-sub-regenerate]');
   try {
-    if (copy) {
+    if (qrView) {
+      const id = Number(qrView.dataset.qrNode);
+      const node = nodes.find(item => item.id === id);
+      const card = qrView.closest('[data-node-id]');
+      qrViews.set(id, qrView.dataset.qrView);
+      card.querySelector('.qr-box').outerHTML = qrPanel(node);
+      card.querySelector(`[data-qr-view="${qrView.dataset.qrView}"]`).focus();
+    } else if (regenerate && confirm('确定重置订阅链接吗？旧订阅链接会立即失效，已导入旧链接的客户端需要重新导入。')) {
+      const id = regenerate.dataset.subRegenerate;
+      await api(`api/nodes/${id}/sub/regenerate`, {method: 'POST'});
+      await load();
+      document.querySelector(`[data-sub-regenerate="${id}"]`)?.focus();
+    } else if (copy) {
       await copyText(copy.dataset.copy);
       copy.textContent = '已复制';
       setTimeout(() => copy.textContent = '复制', 1000);

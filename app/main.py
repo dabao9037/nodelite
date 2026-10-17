@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import qrcode
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -219,6 +219,9 @@ NODE_MIGRATIONS = (
     (10, "traffic_downlink_origin", "traffic_downlink_origin INTEGER NOT NULL DEFAULT 0"),
     (11, "disabled_reason", "disabled_reason TEXT"),
     (12, "max_devices", "max_devices INTEGER"),
+    # Per-node bearer token for the public subscription URL (<base>/sub/<token>).
+    # Existing rows receive a random token in init_db.
+    (13, "sub_token", "sub_token TEXT"),
 )
 # The fully migrated schema, used when rebuilding a table that still holds rows.
 NODES_FULL_SCHEMA = ", ".join(
@@ -365,6 +368,10 @@ def _nodes_copy_plan(existing: set[str]) -> tuple[list[str], list[str]]:
     return [target for target, _ in plan], [source for _, source in plan]
 
 
+def new_sub_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
 def init_db():
     """Create the original schema, then apply repeatable additive migrations."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -392,6 +399,16 @@ def init_db():
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?,?)",
                 (version, int(time.time())),
             )
+        # Every node needs its own subscription token. Rows created before the
+        # subscription feature (or recovered by repair_nodes_schema) get one
+        # here; the unique index prevents two nodes sharing a token.
+        for (node_id,) in conn.execute(
+            "SELECT id FROM nodes WHERE sub_token IS NULL OR sub_token=''"
+        ).fetchall():
+            conn.execute("UPDATE nodes SET sub_token=? WHERE id=?", (new_sub_token(), node_id))
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS nodes_sub_token_unique ON nodes(sub_token)"
+        )
         # Do not reinterpret the legacy aggregate TCP connection limit as a
         # device limit. Existing installations start with no device limit until
         # the administrator explicitly saves one.
@@ -1162,6 +1179,11 @@ def serial(row):
         "config": {key: value for key, value in cfg.items() if key != "private_key"},
         "link": link_for(row),
         "qr": f"api/nodes/{row['id']}/qr",
+        # Admin-only: the subscription token is a bearer secret. The UI builds
+        # the absolute URL from window.location plus this relative path.
+        "sub_token": row["sub_token"],
+        "sub_path": f"sub/{row['sub_token']}",
+        "sub_qr": f"api/nodes/{row['id']}/sub/qr",
         **telemetry,
     }
 
@@ -1309,9 +1331,9 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         try:
             cursor = conn.execute(
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
-                   max_connections, max_devices, traffic_limit_mb) VALUES(?,?,?,?,?,?,?,?,?)""",
+                   max_connections, max_devices, traffic_limit_mb, sub_token) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
-                 None, max_devices, payload.traffic_limit_mb),
+                 None, max_devices, payload.traffic_limit_mb, new_sub_token()),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1494,14 +1516,326 @@ def qr(node_id: int, _=Depends(require_admin)):
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
     if not row:
         raise HTTPException(404, "节点不存在")
+    return Response(qr_png(link_for(row)), media_type="image/png")
+
+
+def qr_png(data: str) -> bytes:
     code = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=12,
         border=4,
     )
-    code.add_data(link_for(row))
+    code.add_data(data)
     code.make(fit=True)
     image = code.make_image(fill_color="black", back_color="white")
     output = BytesIO()
     image.save(output, "PNG")
-    return Response(output.getvalue(), media_type="image/png")
+    return output.getvalue()
+
+
+def panel_base_url(request: Request, base: str | None = None) -> str:
+    """Absolute panel base URL (with trailing slash) as the admin reaches it.
+
+    The browser passes its own ``new URL('./', document.baseURI)`` so the QR
+    code always encodes exactly the URL shown in the UI. It is accepted only
+    when it points at the host this request arrived on; otherwise the URL is
+    rebuilt from the proxy headers the gateway forwards (Host,
+    X-Forwarded-Proto, X-Forwarded-Prefix).
+    """
+    host = request.headers.get("host", "").strip()
+    if base:
+        parsed = urlsplit(base)
+        if (
+            parsed.scheme in {"http", "https"} and parsed.netloc and parsed.netloc == host
+            and not parsed.query and not parsed.fragment and parsed.path.endswith("/")
+            and "@" not in parsed.netloc
+        ):
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    scheme = request.url.scheme if request.url.scheme in {"http", "https"} else "http"
+    netloc = host or f"{PUBLIC_HOST.strip()}"
+    return f"{scheme}://{netloc}{request_cookie_path(request)}"
+
+
+@app.get("/api/nodes/{node_id}/sub/qr")
+def sub_qr(node_id: int, request: Request, base: str | None = None, _=Depends(require_admin)):
+    with closing(connect_db()) as conn:
+        row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "节点不存在")
+    url = panel_base_url(request, base) + f"sub/{row['sub_token']}"
+    return no_store(Response(qr_png(url), media_type="image/png"))
+
+
+@app.post("/api/nodes/{node_id}/sub/regenerate")
+def regenerate_sub(node_id: int, _=Depends(require_admin)):
+    """Replace the node's subscription token; the old URL stops working at once."""
+    with STATE_LOCK, closing(connect_db()) as conn:
+        cursor = conn.execute(
+            "UPDATE nodes SET sub_token=? WHERE id=?", (new_sub_token(), node_id)
+        )
+        conn.commit()
+        if not cursor.rowcount:
+            raise HTTPException(404, "节点不存在")
+        row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    return serial(row)
+
+
+# --- Public subscription endpoint -------------------------------------------
+#
+# GET <panel base>/sub/<token> needs no cookie: proxy clients fetch it
+# unattended. The token is the only credential, so lookups are by exact token
+# and every miss is an empty 404. Disabled, expired and over-quota nodes keep
+# answering 200 with a valid but EMPTY subscription (no proxies) plus the
+# usage/expiry header, so clients show why the node stopped instead of an
+# import error, and no working credentials are handed out.
+
+SUB_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
+SUB_RATE_LOCK = threading.Lock()
+SUB_RATE: dict[str, list[float]] = {}
+# Requests per window per client IP. Tokens carry 192 random bits, so this is
+# only a cheap flood guard, not brute-force protection. There is deliberately
+# no lockout on unknown tokens: clients behind one reverse proxy share an IP
+# and one bad actor must not lock valid subscribers out.
+SUB_RATE_LIMIT = (120, 60.0)
+SUB_RATE_MAX_KEYS = 10000
+
+CLASH_UA_RE = re.compile(r"clash|mihomo|meta|stash|verge|flclash|clashx|nyanpasu|koala", re.I)
+SINGBOX_UA_RE = re.compile(r"sing-?box|\bsf[aim]\b", re.I)
+SUB_TARGETS = {
+    "clash": "clash", "mihomo": "clash", "meta": "clash", "clashmeta": "clash", "stash": "clash",
+    "singbox": "singbox", "sing-box": "singbox", "sfa": "singbox", "sfi": "singbox", "sfm": "singbox",
+    "base64": "base64", "v2ray": "base64", "v2rayn": "base64", "raw": "base64", "plain": "base64",
+}
+CLASH_NETWORKS = {"raw": "tcp", "tcp": "tcp", "ws": "ws", "grpc": "grpc", "h2": "h2", "http": "http", "xhttp": "xhttp"}
+# Xray's "chacha20-poly1305" is the IETF variant; mihomo and sing-box only
+# accept the explicit name.
+CLIENT_SS_METHODS = {"chacha20-poly1305": "chacha20-ietf-poly1305"}
+SINGBOX_TRANSPORTS = {"ws": "ws", "grpc": "grpc", "h2": "http", "http": "http"}
+CLASH_RESERVED_NAMES = {"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL", "PROXY"}
+SUB_GROUP = "PROXY"
+
+
+def _rate_hit(table: dict[str, list[float]], key: str, limit: tuple[int, float], now: float) -> bool:
+    """Fixed-window counter. Returns True while the key is within its limit."""
+    count_limit, window = limit
+    entry = table.get(key)
+    if entry is None or now - entry[0] >= window:
+        if len(table) >= SUB_RATE_MAX_KEYS:
+            for stale in [k for k, v in table.items() if now - v[0] >= window]:
+                table.pop(stale, None)
+            if len(table) >= SUB_RATE_MAX_KEYS:
+                table.clear()
+        table[key] = [now, 1]
+        return True
+    entry[1] += 1
+    return entry[1] <= count_limit
+
+
+def subscription_format(request: Request) -> str:
+    for parameter in ("target", "flag", "format"):
+        value = request.query_params.get(parameter, "").strip().lower()
+        if value in SUB_TARGETS:
+            return SUB_TARGETS[value]
+    agent = request.headers.get("user-agent", "")
+    if CLASH_UA_RE.search(agent):
+        return "clash"
+    if SINGBOX_UA_RE.search(agent):
+        return "singbox"
+    return "base64"
+
+
+def subscription_active(row, now: int | None = None) -> bool:
+    return bool(row["enabled"]) and not is_expired(row, now) and not traffic_limit_values(row)["traffic_exceeded"]
+
+
+def _yaml_str(value) -> str:
+    """Double-quoted scalar that is valid YAML 1.1/1.2 and valid JSON."""
+    out = ['"']
+    for character in str(value):
+        code = ord(character)
+        if character == '"':
+            out.append('\\"')
+        elif character == "\\":
+            out.append("\\\\")
+        elif 0xD800 <= code <= 0xDFFF:
+            out.append("\\ufffd")
+        elif (code < 0x20 or 0x7F <= code <= 0x9F or code in (0x2028, 0x2029, 0xFEFF, 0xFFFE, 0xFFFF)):
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(character)
+    out.append('"')
+    return "".join(out)
+
+
+def client_ss_method(cfg: dict) -> str:
+    method = config_shadowsocks_method(cfg)
+    return CLIENT_SS_METHODS.get(method, method)
+
+
+def clash_proxy_name(row) -> str:
+    name = row["name"].strip() or f"node-{row['id']}"
+    return f"{name} ({row['id']})" if name.upper() in CLASH_RESERVED_NAMES else name
+
+
+def clash_proxy(row) -> dict:
+    """mihomo proxy mapping for one node (values are already YAML-safe)."""
+    cfg = json.loads(row["config"])
+    proxy = {
+        "name": clash_proxy_name(row),
+        "server": PUBLIC_HOST.strip(),
+        "port": int(row["port"]),
+    }
+    if row["protocol"] == "socks":
+        proxy.update(type="socks5", username=cfg["username"], password=cfg["password"], udp=True)
+    elif row["protocol"] == "shadowsocks":
+        proxy.update(type="ss", cipher=client_ss_method(cfg), password=cfg["password"], udp=True)
+    else:
+        proxy.update({
+            "type": "vless",
+            "uuid": cfg["uuid"],
+            "network": CLASH_NETWORKS.get(REALITY_NETWORK, REALITY_NETWORK),
+            "tls": True,
+            "udp": True,
+            "flow": REALITY_FLOW,
+            "servername": cfg["server_name"],
+            "reality-opts": {"public-key": cfg["public_key"], "short-id": cfg["short_id"]},
+            "client-fingerprint": REALITY_FINGERPRINT,
+        })
+    return proxy
+
+
+def _yaml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{_yaml_str(k)}: {_yaml_value(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_yaml_value(item) for item in value) + "]"
+    return _yaml_str(value)
+
+
+def clash_config(rows) -> str:
+    """Complete mihomo config. Proxies are JSON-style flow mappings (valid YAML)."""
+    proxies = [clash_proxy(row) for row in rows]
+    lines = [
+        "# NodeLite subscription (mihomo / Clash Meta)",
+        "mixed-port: 7890",
+        "allow-lan: false",
+        "mode: rule",
+        "log-level: info",
+        "proxies:" + ("" if proxies else " []"),
+    ]
+    lines += [f"  - {_yaml_value(proxy)}" for proxy in proxies]
+    members = [proxy["name"] for proxy in proxies] + ["DIRECT"]
+    lines += [
+        "proxy-groups:",
+        f"  - {_yaml_value({'name': SUB_GROUP, 'type': 'select', 'proxies': members})}",
+        "rules:",
+        f"  - {_yaml_str('MATCH,' + SUB_GROUP)}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def singbox_outbound(row) -> dict:
+    cfg = json.loads(row["config"])
+    outbound = {"tag": clash_proxy_name(row), "server": PUBLIC_HOST.strip(), "server_port": int(row["port"])}
+    if row["protocol"] == "socks":
+        outbound.update(type="socks", version="5", username=cfg["username"], password=cfg["password"])
+    elif row["protocol"] == "shadowsocks":
+        outbound.update(type="shadowsocks", method=client_ss_method(cfg), password=cfg["password"])
+    else:
+        outbound.update({
+            "type": "vless",
+            "uuid": cfg["uuid"],
+            "flow": REALITY_FLOW,
+            "tls": {
+                "enabled": True,
+                "server_name": cfg["server_name"],
+                "utls": {"enabled": True, "fingerprint": REALITY_FINGERPRINT},
+                "reality": {"enabled": True, "public_key": cfg["public_key"], "short_id": cfg["short_id"]},
+            },
+        })
+        transport = SINGBOX_TRANSPORTS.get(REALITY_NETWORK)
+        if transport:
+            outbound["transport"] = {"type": transport}
+    return outbound
+
+
+def singbox_config(rows) -> str:
+    """sing-box 1.11+ profile: TUN + local mixed inbound, selector, direct."""
+    outbounds = [singbox_outbound(row) for row in rows]
+    tags = [item["tag"] for item in outbounds]
+    config = {
+        "log": {"level": "info"},
+        "inbounds": [
+            {"type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+             "auto_route": True, "strict_route": True},
+            {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080},
+        ],
+        "outbounds": [
+            {"type": "selector", "tag": SUB_GROUP, "outbounds": tags + ["direct"],
+             "default": tags[0] if tags else "direct"},
+            *outbounds,
+            {"type": "direct", "tag": "direct"},
+        ],
+        "route": {
+            "rules": [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}],
+            "final": SUB_GROUP,
+            "auto_detect_interface": True,
+        },
+    }
+    return json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+
+
+def subscription_userinfo(row) -> str:
+    upload, download = traffic_totals(row)
+    limit = traffic_limit_values(row)["traffic_limit_bytes"] or 0
+    expire = int(row["expires_at"] or 0)
+    return f"upload={upload}; download={download}; total={limit}; expire={expire}"
+
+
+def subscription_body(rows, fmt: str) -> tuple[str, str]:
+    if fmt == "clash":
+        return clash_config(rows), "text/yaml; charset=utf-8"
+    if fmt == "singbox":
+        return singbox_config(rows), "application/json; charset=utf-8"
+    links = "\n".join(link_for(row) for row in rows)
+    return base64.b64encode(links.encode()).decode(), "text/plain; charset=utf-8"
+
+
+def _client_ip(request: Request) -> str:
+    # uvicorn's proxy_headers (trusted for the local gateway only) already
+    # resolved X-Forwarded-For into request.client.
+    return request.client.host if request.client else "unknown"
+
+
+@app.api_route("/sub/{token}", methods=["GET", "HEAD"])
+def subscription(token: str, request: Request):
+    now = time.time()
+    ip = _client_ip(request)
+    with SUB_RATE_LOCK:
+        limited = not _rate_hit(SUB_RATE, ip, SUB_RATE_LIMIT, now)
+    if limited:
+        return no_store(Response(status_code=429, headers={"Retry-After": "60"}))
+    row = None
+    if SUB_TOKEN_RE.fullmatch(token):
+        with closing(connect_db()) as conn:
+            row = conn.execute("SELECT * FROM nodes WHERE sub_token=?", (token,)).fetchone()
+    if row is None or not secrets.compare_digest(str(row["sub_token"]).encode(), token.encode()):
+        return no_store(Response(status_code=404))
+    fmt = subscription_format(request)
+    rows = [row] if subscription_active(row, int(now)) else []
+    body, media_type = subscription_body(rows, fmt)
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", row["name"]).strip("_") or f"nodelite-{row['id']}"
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(row['name'], safe='')}"
+        ),
+        "profile-update-interval": "24",
+        "subscription-userinfo": subscription_userinfo(row),
+        "profile-title": "base64:" + base64.b64encode(row["name"].encode()).decode(),
+    }
+    return no_store(Response(body, media_type=media_type, headers=headers))

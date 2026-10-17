@@ -72,4 +72,14 @@ assert "DEFAULT_PORT=2060" not in installer
 assert "DEFAULT_PORT=2060" not in docker_installer
 assert "grid-template-columns: minmax(92px, auto)" in stylesheet
 assert ".node-meta .port strong { overflow: visible; text-overflow: clip; white-space: nowrap;" in stylesheet
-print("verified: Reality JSON groups[].targets, five SS methods/backend flow, protocol order, installer contracts")
+# Universal subscription link: public endpoint, token migration, UI controls.
+for marker in (
+    '@app.api_route("/sub/{token}"', '(13, "sub_token", "sub_token TEXT")',
+    "nodes_sub_token_unique", '"/api/nodes/{node_id}/sub/regenerate"', '"/api/nodes/{node_id}/sub/qr"',
+    "subscription-userinfo", "def clash_config(", "def singbox_config(",
+):
+    assert marker in backend, marker
+for marker in ("订阅链接", "订阅二维码", "data-sub-regenerate", "appUrl(node.sub_path)"):
+    assert marker in script, marker
+assert ".qr-box" in stylesheet
+print("verified: Reality JSON groups[].targets, five SS methods/backend flow, protocol order, installer contracts, subscription link")

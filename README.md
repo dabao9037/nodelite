@@ -103,6 +103,28 @@ docker compose up -d --build
 POST /api/nodes/{id}/traffic/reset
 ```
 
+## 订阅链接
+
+每个节点除了分享链接和节点二维码，还有一个通用订阅链接和“订阅二维码”。地址是 `面板地址/sub/<token>`，和面板使用同一个端口和随机路径，客户端拉取时**不需要登录**。
+
+同一个链接按客户端自动返回格式：
+
+- 默认：分享链接的 Base64（v2rayN、v2rayNG、NekoBox、Hiddify、Shadowrocket、Karing 等）。
+- User-Agent 含 `clash|mihomo|meta|stash|verge|flclash|clashx|nyanpasu|koala`，或带 `?target=clash` / `?flag=clash`：完整的 mihomo YAML（proxies、`PROXY` 选择组 + DIRECT、`MATCH,PROXY`）。
+- User-Agent 含 `sing-box|SFA|SFI|SFM`，或带 `?target=singbox`：sing-box JSON 配置。
+- `?target=base64` 可强制返回 Base64。
+
+响应带 `subscription-userinfo`（已用上传/下载、流量上限、到期时间，未设置时为 0）、`profile-update-interval: 24` 和 `Cache-Control: no-store`。节点被停用、到期或流量超限时，订阅仍返回 200，但内容为空（没有可用节点），客户端仍能显示用量和到期；token 错误一律返回无内容的 404。每个来源 IP 每分钟最多 120 次请求。
+
+订阅链接本身就是凭据：知道链接的人就能拿到节点账号。尽量通过 HTTPS 访问面板；链接泄露后在节点卡片点“重置订阅”，旧链接立即失效，客户端需要重新导入。
+
+认证 API：
+
+```text
+POST /api/nodes/{id}/sub/regenerate
+GET  /api/nodes/{id}/sub/qr
+```
+
 ## Release 构建
 
 `.github/workflows/native-release.yml` 在发布 Release 时为 amd64/arm64 构建并上传 tarball。也可以本地构建：

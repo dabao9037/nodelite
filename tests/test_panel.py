@@ -74,7 +74,7 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,max_devices,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, None, 0, 0)
-    assert versions == 12
+    assert versions == 13
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
 
@@ -1642,3 +1642,287 @@ def test_netguard_skips_rules_for_the_panel_port(tmp_path, monkeypatch):
     assert guard.desired_rules(now=20) == [(1, 30001, 2)]
     monkeypatch.setattr(guard, "PROTECTED_PORTS", {30001})
     assert guard.desired_rules(now=20) == []
+
+
+# --- Subscription links ------------------------------------------------------
+
+try:
+    import yaml as _yaml
+except ImportError:  # PyYAML is optional; the YAML checks then use json.
+    _yaml = None
+
+
+def _three_nodes(module, client, monkeypatch):
+    login(client)
+    monkeypatch.setattr(module, "x25519", lambda: ("private-reality-key", "public-reality-key"))
+    key = base64.b64encode(b"0123456789abcdef").decode()
+    created = [
+        client.post("/api/nodes", json={"name": "socks \"q\": #1", "protocol": "socks", "port": 23001,
+                                        "username": "u:ser", "password": "p@ss #'\""}),
+        client.post("/api/nodes", json={"name": "ss-2022", "protocol": "shadowsocks", "port": 23002, "password": key}),
+        client.post("/api/nodes", json={"name": "新加坡 reality", "protocol": "vless", "port": 23003,
+                                        "server_name": "www.example.com", "destination": "www.example.com:443"}),
+    ]
+    assert all(item.status_code == 201 for item in created), [item.text for item in created]
+    return [item.json() for item in created]
+
+
+def _row(module, node_id):
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+
+
+def _parse_yaml(text):
+    if _yaml is not None:
+        return _yaml.safe_load(text)
+    pytest.skip("PyYAML not installed")
+
+
+def test_subscription_token_migration_for_old_db(tmp_path, monkeypatch):
+    db = tmp_path / "old-sub.db"
+    connection = sqlite3.connect(db)
+    connection.execute("""CREATE TABLE nodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, protocol TEXT NOT NULL,
+      port INTEGER NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
+      config TEXT NOT NULL, created_at INTEGER NOT NULL)""")
+    for port in (21500, 21501):
+        connection.execute(
+            "INSERT INTO nodes(name,protocol,port,config,created_at) VALUES(?,?,?,?,?)",
+            (f"old-{port}", "socks", port, json.dumps({"username": "u", "password": "p"}), 1),
+        )
+    connection.commit(); connection.close()
+    module = _panel_module(db, monkeypatch, tmp_path)
+    module.init_db()
+    connection = sqlite3.connect(db)
+    first = connection.execute("SELECT sub_token FROM nodes ORDER BY id").fetchall()
+    connection.close()
+    module.init_db()
+    connection = sqlite3.connect(db)
+    second = connection.execute("SELECT sub_token FROM nodes ORDER BY id").fetchall()
+    indexes = [row[1] for row in connection.execute("PRAGMA index_list(nodes)")]
+    connection.close()
+    tokens = [row[0] for row in first]
+    assert all(token and len(token) == 32 for token in tokens)
+    assert len(set(tokens)) == 2
+    assert first == second  # repeatable: restarts never rotate tokens
+    assert "nodes_sub_token_unique" in indexes
+
+
+def test_subscription_token_survives_broken_table_repair(tmp_path, monkeypatch):
+    db = tmp_path / "stub-sub.db"
+    connection = sqlite3.connect(db)
+    connection.execute(STUB_NODES_TABLE)
+    connection.execute("INSERT INTO nodes(id,port,enabled) VALUES(1,21600,1)")
+    connection.commit(); connection.close()
+    module = _panel_module(db, monkeypatch, tmp_path)
+    module.init_db()
+    connection = sqlite3.connect(db)
+    token = connection.execute("SELECT sub_token FROM nodes").fetchone()[0]
+    connection.close()
+    assert token and len(token) == 32
+
+
+def test_subscription_base64_without_cookie_matches_share_links(panel, monkeypatch):
+    module, client = panel
+    nodes = _three_nodes(module, client, monkeypatch)
+    public = TestClient(module.app)
+    for node in nodes:
+        assert node["sub_path"] == f"sub/{node['sub_token']}"
+        assert node["sub_qr"] == f"api/nodes/{node['id']}/sub/qr"
+        assert "private_key" not in json.dumps(node)
+        response = public.get(f"/{node['sub_path']}", headers={"user-agent": "v2rayN/7.0"}, follow_redirects=False)
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "text/plain; charset=utf-8"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["profile-update-interval"] == "24"
+        assert "attachment" in response.headers["content-disposition"]
+        assert "filename*=UTF-8''" in response.headers["content-disposition"]
+        decoded = base64.b64decode(response.text, validate=True).decode()
+        assert decoded == module.link_for(_row(module, node["id"])) == node["link"]
+        assert "private-reality-key" not in response.text and "private-reality-key" not in decoded
+
+
+def test_subscription_clash_yaml_by_user_agent(panel, monkeypatch):
+    module, client = panel
+    socks, ss, reality = _three_nodes(module, client, monkeypatch)
+    public = TestClient(module.app)
+    for agent in ("clash-verge/v2.0.3", "mihomo/1.19", "ClashMetaForAndroid/2.11", "Stash/2.4", "FlClash/0.8", "ClashX Pro", "clash.meta", "Clash-Nyanpasu", "koala-clash"):
+        response = public.get(f"/{socks['sub_path']}", headers={"user-agent": agent})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/yaml"), agent
+
+    def proxy(node):
+        response = public.get(f"/{node['sub_path']}", headers={"user-agent": "clash-verge/v2"})
+        document = _parse_yaml(response.text)
+        assert document["mode"] == "rule"
+        assert document["rules"] == ["MATCH,PROXY"]
+        [group] = document["proxy-groups"]
+        assert group["type"] == "select" and group["name"] == "PROXY"
+        [item] = document["proxies"]
+        assert group["proxies"] == [item["name"], "DIRECT"]
+        assert "private-reality-key" not in response.text
+        return item
+
+    item = proxy(socks)
+    assert item == {"name": 'socks "q": #1', "type": "socks5", "server": "node.example.test", "port": 23001,
+                    "username": "u:ser", "password": "p@ss #'\"", "udp": True}
+    item = proxy(ss)
+    assert item["type"] == "ss" and item["cipher"] == "2022-blake3-aes-128-gcm"
+    assert item["password"] == ss["config"]["password"] and item["port"] == 23002
+    item = proxy(reality)
+    assert item["name"] == "新加坡 reality"
+    assert item["type"] == "vless" and item["uuid"] == reality["config"]["uuid"]
+    assert item["network"] == "tcp" and item["tls"] is True
+    assert item["flow"] == "xtls-rprx-vision" and item["servername"] == "www.example.com"
+    assert item["reality-opts"] == {"public-key": "public-reality-key", "short-id": reality["config"]["short_id"]}
+    assert item["client-fingerprint"] == module.REALITY_FINGERPRINT == "chrome"
+
+
+def test_subscription_target_override_and_singbox(panel, monkeypatch):
+    module, client = panel
+    socks, ss, reality = _three_nodes(module, client, monkeypatch)
+    public = TestClient(module.app)
+    clash = public.get(f"/{ss['sub_path']}?target=clash", headers={"user-agent": "v2rayNG/1.9"})
+    assert clash.headers["content-type"].startswith("text/yaml")
+    flag = public.get(f"/{ss['sub_path']}?flag=clash")
+    assert flag.headers["content-type"].startswith("text/yaml")
+    forced = public.get(f"/{ss['sub_path']}?target=base64", headers={"user-agent": "clash-verge"})
+    assert base64.b64decode(forced.text).decode() == ss["link"]
+    for request in ({"url": f"/{reality['sub_path']}?target=singbox"},
+                    {"url": f"/{reality['sub_path']}", "headers": {"user-agent": "SFA/1.11.0 (sing-box 1.11.0)"}}):
+        response = public.get(**request)
+        assert response.headers["content-type"].startswith("application/json")
+        config = response.json()
+        selector, outbound, direct = config["outbounds"]
+        assert selector["type"] == "selector" and selector["outbounds"] == [outbound["tag"], "direct"]
+        assert direct["type"] == "direct" and config["route"]["final"] == "PROXY"
+        assert outbound["type"] == "vless" and outbound["flow"] == "xtls-rprx-vision"
+        assert outbound["tls"]["reality"] == {"enabled": True, "public_key": "public-reality-key",
+                                              "short_id": reality["config"]["short_id"]}
+        assert outbound["tls"]["utls"]["fingerprint"] == "chrome"
+        assert "transport" not in outbound
+    legacy = client.post("/api/nodes", json={"name": "chacha", "protocol": "shadowsocks", "port": 23009,
+                                              "method": "chacha20-poly1305", "password": "pw"}).json()
+    document = _parse_yaml(public.get(f"/{legacy['sub_path']}?target=clash").text)
+    assert document["proxies"][0]["cipher"] == "chacha20-ietf-poly1305"
+
+
+def test_subscription_bad_token_is_bare_404_and_not_a_login_redirect(panel):
+    module, client = panel
+    public = TestClient(module.app)
+    for path in ("/sub/" + "A" * 32, "/sub/short", "/sub/" + "%27%20OR%201=1--" * 3):
+        response = public.get(path, follow_redirects=False)
+        assert response.status_code == 404, path
+        assert response.content == b""
+        assert "location" not in response.headers
+
+
+def test_subscription_through_forwarded_prefix(panel, monkeypatch):
+    module, client = panel
+    [socks, *_] = _three_nodes(module, client, monkeypatch)
+    module.app.root_path = "/node-panel"
+    public = TestClient(module.app)
+    response = public.get(f"/node-panel/{socks['sub_path']}", follow_redirects=False)
+    assert response.status_code == 200
+    assert base64.b64decode(response.text).decode() == socks["link"]
+
+
+def test_subscription_regenerate_invalidates_old_token_and_is_admin_only(panel, monkeypatch):
+    module, client = panel
+    [socks, *_] = _three_nodes(module, client, monkeypatch)
+    public = TestClient(module.app)
+    assert public.post(f"/api/nodes/{socks['id']}/sub/regenerate").status_code == 401
+    assert public.get(f"/api/nodes/{socks['id']}/sub/qr").status_code == 401
+    rotated = client.post(f"/api/nodes/{socks['id']}/sub/regenerate")
+    assert rotated.status_code == 200
+    new = rotated.json()
+    assert new["sub_token"] != socks["sub_token"] and new["link"] == socks["link"]
+    assert public.get(f"/{socks['sub_path']}").status_code == 404
+    assert public.get(f"/{new['sub_path']}").status_code == 200
+    assert client.post("/api/nodes/999/sub/regenerate").status_code == 404
+
+
+def test_subscription_disabled_and_expired_return_empty_valid_subscription(panel, monkeypatch):
+    module, client = panel
+    socks, ss, reality = _three_nodes(module, client, monkeypatch)
+    public = TestClient(module.app)
+    assert client.post(f"/api/nodes/{socks['id']}/toggle").json()["enabled"] is False
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute("UPDATE nodes SET expires_at=?, enabled=0, disabled_reason='expired' WHERE id=?",
+                           (int(time.time()) - 5, ss["id"]))
+        connection.execute("UPDATE nodes SET traffic_limit_mb=1, traffic_uplink_base=? WHERE id=?",
+                           (2 * 1024 * 1024, reality["id"]))
+        connection.commit()
+    for node in (socks, ss, reality):
+        plain = public.get(f"/{node['sub_path']}")
+        assert plain.status_code == 200 and plain.text == ""
+        assert "subscription-userinfo" in plain.headers
+        document = _parse_yaml(public.get(f"/{node['sub_path']}?target=clash").text)
+        assert document["proxies"] == []
+        assert document["proxy-groups"][0]["proxies"] == ["DIRECT"]
+        singbox = public.get(f"/{node['sub_path']}?target=singbox").json()
+        assert [item["type"] for item in singbox["outbounds"]] == ["selector", "direct"]
+
+
+def test_subscription_userinfo_header(panel, monkeypatch):
+    module, client = panel
+    [socks, *_] = _three_nodes(module, client, monkeypatch)
+    expires = int(time.time()) + 86400
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.execute(
+            """UPDATE nodes SET traffic_limit_mb=100, expires_at=?, traffic_uplink_base=1000,
+               traffic_downlink_base=5000, traffic_uplink_raw=300, traffic_uplink_origin=100 WHERE id=?""",
+            (expires, socks["id"]),
+        )
+        connection.commit()
+    response = TestClient(module.app).get(f"/{socks['sub_path']}")
+    assert response.headers["subscription-userinfo"] == (
+        f"upload=1200; download=5000; total={100 * 1024 * 1024}; expire={expires}"
+    )
+    unlimited = client.post("/api/nodes", json={"name": "free", "protocol": "socks", "port": 23020}).json()
+    response = TestClient(module.app).get(f"/{unlimited['sub_path']}")
+    assert response.headers["subscription-userinfo"] == "upload=0; download=0; total=0; expire=0"
+
+
+def test_subscription_rate_limit_without_unknown_token_lockout(panel, monkeypatch):
+    module, client = panel
+    [socks, *_] = _three_nodes(module, client, monkeypatch)
+    monkeypatch.setattr(module, "SUB_RATE_LIMIT", (3, 60.0))
+    module.SUB_RATE.clear()
+    public = TestClient(module.app)
+    assert [public.get(f"/{socks['sub_path']}").status_code for _ in range(4)] == [200, 200, 200, 429]
+    assert public.get(f"/{socks['sub_path']}").headers["retry-after"] == "60"
+    module.SUB_RATE.clear()
+    # Unknown tokens never lock a shared IP out of valid subscriptions.
+    assert [public.get("/sub/" + "B" * 32).status_code for _ in range(2)] == [404, 404]
+    assert public.get(f"/{socks['sub_path']}").status_code == 200
+    module.SUB_RATE.clear()
+
+
+def test_subscription_qr_encodes_the_url_the_ui_shows(panel, monkeypatch):
+    module, client = panel
+    [socks, *_] = _three_nodes(module, client, monkeypatch)
+    captured = []
+    original = module.qr_png
+    monkeypatch.setattr(module, "qr_png", lambda data: captured.append(data) or original(data))
+    base = "http://testserver/abcdEFGH1234/"
+    response = client.get(f"/api/nodes/{socks['id']}/sub/qr", params={"base": base})
+    assert response.status_code == 200 and response.headers["content-type"] == "image/png"
+    assert captured[-1] == base + socks["sub_path"]
+    # A foreign host cannot be smuggled into the QR code.
+    client.get(f"/api/nodes/{socks['id']}/sub/qr", params={"base": "https://evil.example/x/"})
+    assert captured[-1] == f"http://testserver/{socks['sub_path']}"
+    client.get(f"/api/nodes/{socks['id']}/sub/qr", headers={"x-forwarded-prefix": "/panelpath01"})
+    assert captured[-1] == f"http://testserver/panelpath01/{socks['sub_path']}"
+
+
+def test_subscription_ui_controls(panel):
+    module, _ = panel
+    script = (Path(module.BASE_DIR) / "static/app.js").read_text()
+    css = (Path(module.BASE_DIR) / "static/app.css").read_text()
+    for marker in ("订阅链接", "订阅二维码", "节点二维码", "data-sub-regenerate", "确定重置订阅链接吗",
+                   "Clash/Mihomo/Stash 用订阅链接；v2rayN/NekoBox/Shadowrocket/Hiddify 两种都能用",
+                   "appUrl(node.sub_path)", "sub/regenerate", "aria-pressed", "订阅链接等同密码"):
+        assert marker in script, marker
+    assert ".qr-box" in css and ".sub-hint" in css

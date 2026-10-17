@@ -1926,3 +1926,18 @@ def test_subscription_ui_controls(panel):
                    "appUrl(node.sub_path)", "sub/regenerate", "aria-pressed", "订阅链接等同密码"):
         assert marker in script, marker
     assert ".qr-box" in css and ".sub-hint" in css
+
+
+def test_static_assets_are_fingerprinted_so_upgrades_bust_browser_cache(panel):
+    module, client = panel
+    login_html = client.get("/login").text
+    for name in ("app.css", "login.js"):
+        assert f'static/{name}?v={module.ASSET_VERSIONS[name]}"' in login_html
+    login(client)
+    home = client.get("/").text
+    for name in ("app.js", "app.css"):
+        version = module.ASSET_VERSIONS[name]
+        assert len(version) == 12 and version != "0"
+        assert f'static/{name}?v={version}"' in home
+    assert 'src="static/app.js"' not in home
+    assert client.get(f"/static/app.js?v={module.ASSET_VERSIONS['app.js']}").status_code == 200

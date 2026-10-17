@@ -1202,6 +1202,25 @@ def request_cookie_path(request: Request):
     return "/" if not root_path else "/" + root_path.strip("/") + "/"
 
 
+def _asset_version(name: str) -> str:
+    try:
+        return hashlib.sha256((BASE_DIR / "static" / name).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
+# Browsers heuristically cache static files served without Cache-Control, so after
+# an upgrade the panel kept running the old app.js. Fingerprint every asset URL
+# with its content hash: a new release always yields new URLs.
+ASSET_VERSIONS = {name: _asset_version(name) for name in ("app.js", "app.css", "login.js")}
+
+
+def versioned_assets(html: str) -> str:
+    for name, version in ASSET_VERSIONS.items():
+        html = html.replace(f'"static/{name}"', f'"static/{name}?v={version}"')
+    return html
+
+
 def render_login(error: str = ""):
     template = (BASE_DIR / "static/login.html").read_text(encoding="utf-8")
     replacements = {
@@ -1211,7 +1230,7 @@ def render_login(error: str = ""):
     }
     for marker, value in replacements.items():
         template = template.replace(marker, value)
-    return template
+    return versioned_assets(template)
 
 
 def no_store(response: Response):
@@ -1278,7 +1297,7 @@ def logout(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def home(_=Depends(require_admin)):
-    return no_store(HTMLResponse((BASE_DIR / "static/index.html").read_text(encoding="utf-8")))
+    return no_store(HTMLResponse(versioned_assets((BASE_DIR / "static/index.html").read_text(encoding="utf-8"))))
 
 
 @app.get("/api/nodes")

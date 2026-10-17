@@ -95,7 +95,37 @@ validate_release_compatibility() {
 }
 latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
-  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+  # GitHub API / CDN may serve a stale "latest" for a while after a release;
+  # bust the cache so an update never silently reinstalls the previous version.
+  local attempt payload tag url
+  for attempt in 1 2 3 4 5; do
+    url="https://api.github.com/repos/$REPO/releases/latest?nodelite=$(date +%s)-$attempt-$RANDOM"
+    payload="$(curl -fsSL \
+      --connect-timeout 15 --max-time 60 \
+      --retry 3 --retry-all-errors --retry-delay 2 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$url" 2>/dev/null || true)"
+    tag="$(printf '%s' "$payload" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-native$ ]]; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+    sleep $((attempt * 2))
+  done
+  return 1
+}
+
+installed_version() {
+  local version commit
+  version="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || true)"
+  commit="$(cat "$INSTALL_DIR/BUILD_COMMIT" 2>/dev/null || true)"
+  [[ -n "$version" ]] || version="未知"
+  if [[ "$commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s (%s)' "$version" "${commit:0:7}"
+  else
+    printf '%s' "$version"
+  fi
 }
 require_native() { [[ -f "$INSTALL_DIR/config/nodelite.env" && -x "$INSTALL_DIR/bin/nodelite-panel" ]] || die "NodeLite 原生版尚未安装"; }
 
@@ -360,6 +390,12 @@ install_or_update() {
   preflight_port "$port"
   choose_internal_port "$old_internal"
   install_release_code "$release_dir"
+  [[ -s "$INSTALL_DIR/VERSION" ]] || die "安装后的版本文件缺失；拒绝报告更新成功"
+  [[ "$(cat "$INSTALL_DIR/VERSION")" == "$tag" ]] || \
+    die "安装后版本不匹配：期望 $tag，实际 $(installed_version)"
+  [[ -s "$INSTALL_DIR/BUILD_COMMIT" ]] || die "安装后的构建提交标记缺失；拒绝报告更新成功"
+  cmp -s "$INSTALL_DIR/install.sh" "$release_dir/install.sh" || \
+    die "安装后的管理脚本不是本次发行包版本；拒绝报告更新成功"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'
@@ -368,7 +404,7 @@ JSON
   fi
   install_units
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
-  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
+  wait_healthy; ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
@@ -548,7 +584,7 @@ uninstall_nodelite() {
 }
 
 menu() {
-  while true; do cat <<'EOF'
+  while true; do printf '\n当前版本：%s\n' "$(installed_version)"; cat <<'EOF'
 
 ============== NodeLite 原生管理菜单 ==============
   1. 安装 / 更新（默认原生 systemd）

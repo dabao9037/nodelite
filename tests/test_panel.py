@@ -1941,3 +1941,35 @@ def test_static_assets_are_fingerprinted_so_upgrades_bust_browser_cache(panel):
         assert f'static/{name}?v={version}"' in home
     assert 'src="static/app.js"' not in home
     assert client.get(f"/static/app.js?v={module.ASSET_VERSIONS['app.js']}").status_code == 200
+
+
+def test_netguard_rebuilds_instead_of_crashing_after_node_deleted(tmp_path, monkeypatch):
+    """Regression: deleting a node left its nft sets behind, and
+    validate_installed looked up the removed node id (KeyError: 2), crashing
+    netguard instead of rebuilding the table without the stale sets."""
+    guard = load_netguard(tmp_path, monkeypatch)
+    installed = real_installed_fixture()
+    monkeypatch.setattr(guard, "_nft_json", lambda: installed)
+    desired = [(1, 30001, 2)]
+    with pytest.raises(guard.InstalledMismatch):
+        guard.validate_installed(desired)
+
+    applied = []
+    checks = iter([True, False])
+
+    def fake_validate(value):
+        if next(checks):
+            raise guard.InstalledMismatch("stale nftables set for removed node 2")
+
+    monkeypatch.setattr(guard, "validate_installed", fake_validate)
+    monkeypatch.setattr(guard, "desired_rules", lambda: desired)
+    monkeypatch.setattr(guard, "established_sources", lambda ports: {port: set() for port in ports})
+    monkeypatch.setattr(guard, "_ensure_table", lambda: None)
+    monkeypatch.setattr(guard, "_apply_ruleset", applied.append)
+    monkeypatch.setattr(guard, "_legacy_rollback", lambda: None)
+    Path(guard.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    Path(guard.DB_PATH).touch()
+    assert guard.reconcile() == [
+        {"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 0},
+    ]
+    assert len(applied) == 1 and "devices_2_" not in applied[0] and "30002" not in applied[0]

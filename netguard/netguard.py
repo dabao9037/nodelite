@@ -543,6 +543,10 @@ def validate_installed(desired: list[tuple[int, int, int]]) -> None:
         # their admitted members, but always trigger replacement.
         if family is None:
             raise InstalledMismatch("legacy nftables device set requires migration")
+        # A set left over from a deleted node is stale state, not a crash:
+        # report a mismatch so reconcile rebuilds the table without it.
+        if node_id not in expected:
+            raise InstalledMismatch(f"stale nftables set for removed node {node_id}")
         expected_type = "ipv4_addr" if family == "ipv4" else "ipv6_addr"
         if (
             nft_set.get("family") != TABLE_FAMILY

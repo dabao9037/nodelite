@@ -200,12 +200,12 @@ function localDateTime(epoch) {
 
 const REALITY_PRESETS = new Set([
   'www.atlasobscura.com', 'www.backblaze.com',
-  'www.jodrellbank.net', 'www.sciencemuseum.org.uk',
-  'www.animatetimes.com', 'www.famitsu.com',
+  'www.skao.int', 'www.sciencemuseum.org.uk',
+  'www.4gamer.net', 'www.famitsu.com',
   'www.a-star.edu.sg', 'www.visitsingapore.com',
-  'www.cern.ch', 'www.gog.com',
+  'www.fraunhofer.de', 'www.gog.com',
   'www.hkstp.org', 'www.discoverhongkong.com',
-  'www.visitdubai.com', 'www.dubaiairports.ae'
+  'www.visitdubai.com', 'www.dm.gov.ae'
 ]);
 
 function updateShadowsocksMethod() {

@@ -140,12 +140,12 @@ bash scripts/build-native-release-container.sh amd64
 内置目标继续遵循“小众境外网站优先”的筛选方向，按地区分组，每个地区提供两个候选：
 
 - 美国：Atlas Obscura（小众旅行）、Backblaze（小众云存储企业）
-- 英国：Jodrell Bank（天文研究）、Science Museum（科学教育）
-- 日本：Animate Times（二次元资讯）、Famitsu（游戏资讯）
+- 英国：SKAO（射电天文研究）、Science Museum（科学教育）
+- 日本：4Gamer（游戏媒体）、Famitsu（游戏资讯）
 - 东南亚：A*STAR（新加坡科研）、Visit Singapore（旅游）
-- 欧洲：CERN（瑞士科研）、GOG（波兰游戏平台）
+- 欧洲：Fraunhofer（应用科研）、GOG（波兰游戏平台）
 - 香港：HKSTP（香港科技园）、Discover Hong Kong（旅游）
-- 迪拜：Visit Dubai（迪拜旅游局）、Dubai Airports（迪拜机场）
+- 迪拜：Visit Dubai（迪拜旅游局）、Dubai Municipality（迪拜市政府）
 - 自定义
 
 候选方向集中在学术研究、旅游、二次元、游戏和小众企业，避免把 Apple、Microsoft、BBC 等大型通用站点作为内置预设。发布前检查 DNS、443、TLS 1.3 和证书主机名匹配；Reality 目标的实际可用性仍受服务器出口与站点策略影响，部署后应使用真实客户端测试。

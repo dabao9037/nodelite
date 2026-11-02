@@ -120,9 +120,13 @@ export PUBLIC_HOST=127.0.0.1
 mkdir -p "$NODELITE_SYSTEMD_DIR"
 
 bash /src/install.sh install >/tmp/install-v021.log
-grep -q 'v0.2.1-native / amd64' /tmp/install-v021.log
+grep -q 'v0.2.1-native (1111111) / amd64' /tmp/install-v021.log
 test "$(cat /opt/nodelite/VERSION)" = v0.2.1-native
 test -f /opt/nodelite/install.sh
+test -x "$NODELITE_BIN_DIR/nodelite"
+test -x "$NODELITE_BIN_DIR/node"
+grep -q 'NodeLite management shortcut' "$NODELITE_BIN_DIR/nodelite"
+cmp -s "$NODELITE_BIN_DIR/node" "$NODELITE_BIN_DIR/nodelite"
 printf 'archive-v021-config-preserved\n' >/opt/nodelite/config/archive-sentinel
 printf 'preserved-before-update\n' >/opt/nodelite/data/panel.db
 printf 'preserved-xray-config\n' >/opt/nodelite/xray-config/config.json
@@ -139,7 +143,7 @@ cd /opt/nodelite
 # current installer path identical to its managed destination.
 printf '1\n0\n' | (cd /opt/nodelite && bash install.sh menu) >/tmp/install-v022-menu.log
 ! grep -Eqi 'same file|same-file|are the same file|同一个文件' /tmp/install-v022-menu.log
-grep -q 'v0.2.2-native / amd64' /tmp/install-v022-menu.log
+grep -q 'v0.2.2-native (2222222) / amd64' /tmp/install-v022-menu.log
 grep -q '当前版本：v0.2.1-native (1111111)' /tmp/install-v022-menu.log
 test "$(cat /opt/nodelite/VERSION)" = v0.2.2-native
 test "$(cat /opt/nodelite/BUILD_COMMIT)" = 2222222222222222222222222222222222222222

@@ -404,7 +404,9 @@ JSON
   fi
   install_units
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
-  wait_healthy; ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
+  wait_healthy
+  install_shortcuts
+  ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
@@ -606,4 +608,4 @@ EOF
   local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|uninstall|docker|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; shortcuts) install_shortcuts;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|uninstall|docker|shortcuts|menu]";; esac

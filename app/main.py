@@ -167,6 +167,20 @@ class DeviceLimitFields(BaseModel):
         return ...
 
 
+def normalize_egress_ip(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("出口 IP 必须是有效的 IPv4 或 IPv6 地址")
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_address(value.strip("[]")))
+    except ValueError:
+        raise ValueError("出口 IP 必须是有效的 IPv4 或 IPv6 地址") from None
+
+
 class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str = Field(min_length=1, max_length=80)
     protocol: str
@@ -176,10 +190,22 @@ class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     method: str | None = None
     destination: str | None = None
     server_name: str | None = None
+    egress_ip: str | None = None
+
+    @field_validator("egress_ip", mode="before")
+    @classmethod
+    def validate_egress_ip(cls, value):
+        return normalize_egress_ip(value)
 
 
 class NodeUpdate(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    egress_ip: str | None = None
+
+    @field_validator("egress_ip", mode="before")
+    @classmethod
+    def validate_egress_ip(cls, value):
+        return normalize_egress_ip(value)
 
 
 class TelemetrySample(dict):
@@ -223,6 +249,8 @@ NODE_MIGRATIONS = (
     # Per-node bearer token for the public subscription URL (<base>/sub/<token>).
     # Existing rows receive a random token in init_db.
     (13, "sub_token", "sub_token TEXT"),
+    # Optional per-node source/exit IP. Empty means the system default route.
+    (14, "egress_ip", "egress_ip TEXT"),
 )
 # The fully migrated schema, used when rebuilding a table that still holds rows.
 NODES_FULL_SCHEMA = ", ".join(
@@ -792,19 +820,66 @@ def inbound(row):
 
 def config_for(rows, now: int | None = None):
     now = now if now is not None else int(time.time())
+    active = [row for row in rows if row["enabled"] and not is_expired(row, now)]
+    outbounds = [{"protocol": "freedom", "tag": "direct"}]
+    rules = [{"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}]
+    for row in active:
+        egress = _row_egress(row)
+        if not egress:
+            continue
+        tag = f"direct-{row['id']}"
+        outbounds.append({"protocol": "freedom", "tag": tag, "sendThrough": egress})
+        rules.append({"type": "field", "inboundTag": [f"node-{row['id']}"], "outboundTag": tag})
+    outbounds.append({"protocol": "blackhole", "tag": "blocked"})
     return {
         "log": {"loglevel": "warning"},
         "api": {"tag": "api", "listen": XRAY_API_ADDRESS, "services": ["StatsService"]},
         "metrics": {"tag": "Metrics", "listen": XRAY_METRICS_ADDRESS},
         "stats": {},
         "policy": {"system": {"statsInboundUplink": True, "statsInboundDownlink": True}},
-        "inbounds": [inbound(row) for row in rows if row["enabled"] and not is_expired(row, now)],
-        "outbounds": [
-            {"protocol": "freedom", "tag": "direct"},
-            {"protocol": "blackhole", "tag": "blocked"},
-        ],
-        "routing": {"rules": [{"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"}]},
+        "inbounds": [inbound(row) for row in active],
+        "outbounds": outbounds,
+        "routing": {"rules": rules},
     }
+
+
+def local_public_ips() -> list[str]:
+    """Public IPs assigned to this host, for the per-node egress selector."""
+    values: set[str] = set()
+
+    def add(value) -> None:
+        try:
+            address = ipaddress.ip_address(str(value).strip().strip("[]").split("%", 1)[0])
+        except ValueError:
+            return
+        if address.is_global:
+            values.add(str(address))
+
+    try:
+        output = subprocess.check_output(
+            ["ip", "-j", "addr", "show"], text=True, timeout=3, stderr=subprocess.DEVNULL
+        )
+        links = json.loads(output or "[]")
+        if isinstance(links, list):
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                for info in link.get("addr_info", []):
+                    if isinstance(info, dict) and info.get("scope") == "global":
+                        add(info.get("local", ""))
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        pass
+    if not values:
+        try:
+            output = subprocess.check_output(
+                ["hostname", "-I"], text=True, timeout=3, stderr=subprocess.DEVNULL
+            )
+            for token in output.split():
+                add(token)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    add(PUBLIC_HOST.strip())
+    return sorted(values, key=lambda item: (ipaddress.ip_address(item).version != 4, ipaddress.ip_address(item)))
 
 
 def current_rows():
@@ -1175,10 +1250,26 @@ def advertised_host(request: Request | None = None) -> str:
     return configured
 
 
+def _row_egress(row) -> str:
+    try:
+        return (row["egress_ip"] or "").strip()
+    except (KeyError, IndexError):
+        return ""
+
+
+def node_host(row, host: str | None = None) -> str:
+    """Address used in a node's share link and subscription.
+
+    The per-node egress IP wins over the panel's install-time PUBLIC_HOST so a
+    multi-IP server can expose different nodes on different addresses.
+    """
+    return (_row_egress(row) or host or PUBLIC_HOST).strip()
+
+
 def link_for(row, host: str | None = None):
     cfg = json.loads(row["config"])
     name = quote(row["name"], safe="")
-    host = (host or PUBLIC_HOST).strip()
+    host = node_host(row, host)
     if row["protocol"] == "socks":
         username = quote(cfg["username"], safe="")
         password = quote(cfg["password"], safe="")
@@ -1216,6 +1307,7 @@ def serial(row, host: str | None = None):
         "port": row["port"],
         "enabled": bool(row["enabled"]),
         "disabled_reason": row["disabled_reason"],
+        "egress_ip": row["egress_ip"],
         "config": {key: value for key, value in cfg.items() if key != "private_key"},
         "link": link_for(row, host),
         "qr": f"api/nodes/{row['id']}/qr",
@@ -1356,6 +1448,11 @@ def nodes_telemetry(_=Depends(require_admin)):
     return [{"id": row["id"], **(telemetry.get(row["id"]) or _telemetry_for_row(row, time.time(), 0))} for row in rows]
 
 
+@app.get("/api/server-ips")
+def server_ips(_=Depends(require_admin)):
+    return {"ips": local_public_ips()}
+
+
 @app.post("/api/nodes", status_code=201)
 def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
     protocol = payload.protocol.lower().strip()
@@ -1391,9 +1488,10 @@ def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
         try:
             cursor = conn.execute(
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
-                   max_connections, max_devices, traffic_limit_mb, sub_token) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                   max_connections, max_devices, traffic_limit_mb, sub_token, egress_ip)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
-                 None, max_devices, payload.traffic_limit_mb, new_sub_token()),
+                 None, max_devices, payload.traffic_limit_mb, new_sub_token(), payload.egress_ip),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1429,6 +1527,9 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         traffic_limit_mb = old["traffic_limit_mb"]
         if "traffic_limit_mb" in payload.model_fields_set:
             traffic_limit_mb = payload.traffic_limit_mb
+        egress_ip = old["egress_ip"]
+        if "egress_ip" in payload.model_fields_set:
+            egress_ip = payload.egress_ip
         enabled = int(old["enabled"])
         disabled_reason = old["disabled_reason"]
         if new_expiry is not None and new_expiry <= int(time.time()):
@@ -1445,8 +1546,8 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
                 disabled_reason = None
         conn.execute(
             """UPDATE nodes SET name=?, expires_at=?, max_devices=?, traffic_limit_mb=?,
-               enabled=?, disabled_reason=? WHERE id=?""",
-            (name, new_expiry, max_devices, traffic_limit_mb,
+               egress_ip=?, enabled=?, disabled_reason=? WHERE id=?""",
+            (name, new_expiry, max_devices, traffic_limit_mb, egress_ip,
              enabled, disabled_reason, node_id),
         )
         conn.commit()
@@ -1456,9 +1557,9 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         with closing(connect_db()) as conn:
             conn.execute(
                 """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?,
-                   traffic_limit_mb=?, enabled=?, disabled_reason=? WHERE id=?""",
+                   traffic_limit_mb=?, egress_ip=?, enabled=?, disabled_reason=? WHERE id=?""",
                 (old["name"], old["expires_at"], old["max_connections"], old["max_devices"],
-                 old["traffic_limit_mb"], old["enabled"], old["disabled_reason"], node_id),
+                 old["traffic_limit_mb"], old["egress_ip"], old["enabled"], old["disabled_reason"], node_id),
             )
             conn.commit()
         apply_runtime(force=True)
@@ -1742,7 +1843,7 @@ def clash_proxy(row, host: str | None = None) -> dict:
     cfg = json.loads(row["config"])
     proxy = {
         "name": clash_proxy_name(row),
-        "server": (host or PUBLIC_HOST).strip(),
+        "server": node_host(row, host),
         "port": int(row["port"]),
     }
     if row["protocol"] == "socks":
@@ -1801,7 +1902,7 @@ def clash_config(rows, host: str | None = None) -> str:
 
 def singbox_outbound(row, host: str | None = None) -> dict:
     cfg = json.loads(row["config"])
-    outbound = {"tag": clash_proxy_name(row), "server": (host or PUBLIC_HOST).strip(), "server_port": int(row["port"])}
+    outbound = {"tag": clash_proxy_name(row), "server": node_host(row, host), "server_port": int(row["port"])}
     if row["protocol"] == "socks":
         outbound.update(type="socks", version="5", username=cfg["username"], password=cfg["password"])
     elif row["protocol"] == "shadowsocks":

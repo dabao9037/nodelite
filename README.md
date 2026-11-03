@@ -103,6 +103,15 @@ docker compose up -d --build
 POST /api/nodes/{id}/traffic/reset
 ```
 
+## 多 IP 与节点出口
+
+多 IP 服务器创建或编辑节点时，可在“出口 IP（可选）”选择（或手填）一个公网 IP：
+
+- NodeLite 会为该节点生成独立的 freedom outbound，`sendThrough` 使用所选 IP；
+- 该 IP 同时用于分享链接、二维码、Clash / sing-box / Base64 订阅中的节点地址；
+- 留空时继续使用 `PUBLIC_HOST` 和系统默认出口；
+- 面板会从本机网卡自动列出公网 IP；NAT 或未绑定到网卡的地址可手动输入。
+
 ## 订阅链接
 
 每个节点除了分享链接和节点二维码，还有一个通用订阅链接和“订阅二维码”。地址是 `面板地址/sub/<token>`，和面板使用同一个端口和随机路径，客户端拉取时**不需要登录**。

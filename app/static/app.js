@@ -109,6 +109,16 @@ ${qrPanel(node)}
   `).join('');
 }
 
+async function loadServerIps() {
+  const body = await api('api/server-ips');
+  const list = $('#egressIpOptions');
+  list.replaceChildren(...body.ips.map(ip => {
+    const option = document.createElement('option');
+    option.value = ip;
+    return option;
+  }));
+}
+
 async function load() {
   nodes = await api('api/nodes');
   render();
@@ -272,6 +282,7 @@ $('#createForm').addEventListener('submit', async event => {
     const body = {
       name: $('#name').value, protocol,
       port: $('#port').value ? Number($('#port').value) : null,
+      egress_ip: $('#egressIp').value.trim() || null,
       max_devices: $('#maxDevices').value ? Number($('#maxDevices').value) : null,
       traffic_limit_mb: $('#trafficLimitMb').value ? Number($('#trafficLimitMb').value) : null,
       ...expirationPayload()
@@ -326,6 +337,7 @@ $('#list').addEventListener('click', async event => {
       const node = nodes.find(item => item.id === Number(edit.dataset.edit));
       $('#editId').value = node.id;
       $('#editName').value = node.name;
+      $('#editEgressIp').value = node.egress_ip || '';
       $('#editMaxDevices').value = node.max_devices || '';
       $('#editTrafficLimitMb').value = node.traffic_limit_mb || '';
       $('#editExpirationMode').value = node.expires_at ? 'date' : 'never';
@@ -351,6 +363,7 @@ $('#editForm').addEventListener('submit', async event => {
   try {
     const body = {
       name: $('#editName').value,
+      egress_ip: $('#editEgressIp').value.trim() || null,
       max_devices: $('#editMaxDevices').value ? Number($('#editMaxDevices').value) : null,
       traffic_limit_mb: $('#editTrafficLimitMb').value ? Number($('#editTrafficLimitMb').value) : null,
       ...expirationPayload('edit')
@@ -362,6 +375,7 @@ $('#editForm').addEventListener('submit', async event => {
 });
 
 $('#refresh').addEventListener('click', () => load().catch(showError));
+loadServerIps().catch(() => {});
 load().then(() => {
   telemetryTimer = setInterval(() => refreshTelemetry().catch(showError), 2000);
 }).catch(showError);

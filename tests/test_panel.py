@@ -74,9 +74,10 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,max_devices,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, None, 0, 0)
-    assert versions == 13
+    assert versions == 14
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
+    assert "egress_ip" in columns
 
 
 def test_migration_infers_disabled_reason_and_persists_after_restart(tmp_path, monkeypatch):
@@ -974,6 +975,66 @@ def test_shadowsocks_selected_method_drives_config_link_and_serial(panel):
         connection.row_factory = sqlite3.Row
         row = connection.execute("SELECT * FROM nodes WHERE id=1").fetchone()
     assert module.inbound(row)["settings"]["method"] == "chacha20-poly1305"
+
+
+def test_node_egress_ip_sets_link_outbound_and_subscription(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "multi-ip", "protocol": "socks", "port": 22094, "egress_ip": "1.2.3.4",
+    })
+    assert created.status_code == 201, created.text
+    node = created.json()
+    assert node["egress_ip"] == "1.2.3.4"
+    assert urlsplit(node["link"]).hostname == "1.2.3.4"
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes WHERE id=1").fetchone()
+    configuration = module.config_for([row])
+    assert {"protocol": "freedom", "tag": "direct-1", "sendThrough": "1.2.3.4"} in configuration["outbounds"]
+    assert {"type": "field", "inboundTag": ["node-1"], "outboundTag": "direct-1"} in configuration["routing"]["rules"]
+    assert module.inbound(row)["listen"] == "0.0.0.0"
+
+    public = TestClient(module.app)
+    response = public.get(f"/{node['sub_path']}", headers={"user-agent": "v2rayN/7.0"})
+    decoded = base64.b64decode(response.text, validate=True).decode()
+    assert "@1.2.3.4:" in decoded
+    clash = public.get(f"/{node['sub_path']}?target=clash")
+    assert '"server": "1.2.3.4"' in clash.text
+
+
+def test_node_egress_ip_can_be_cleared_and_is_validated(panel):
+    module, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "clear me", "protocol": "socks", "port": 22095, "egress_ip": "1.2.3.4",
+    })
+    assert created.status_code == 201, created.text
+    node = created.json()
+    cleared = client.put(f"/api/nodes/{node['id']}", json={"egress_ip": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["egress_ip"] is None
+    assert urlsplit(cleared.json()["link"]).hostname == "node.example.test"
+    invalid = client.post("/api/nodes", json={
+        "name": "bad ip", "protocol": "socks", "port": 22096, "egress_ip": "not-an-ip",
+    })
+    assert invalid.status_code == 422
+
+
+def test_server_ips_endpoint_lists_detected_public_ips(panel, monkeypatch):
+    module, client = panel
+    monkeypatch.setattr(module, "local_public_ips", lambda: ["1.1.1.1", "2.2.2.2"])
+    login(client)
+    assert client.get("/api/server-ips").json() == {"ips": ["1.1.1.1", "2.2.2.2"]}
+
+
+def test_node_form_exposes_egress_ip_selector(panel):
+    module, client = panel
+    login(client)
+    html = client.get("/").text
+    assert 'id="egressIp"' in html and 'id="egressIpOptions"' in html and 'id="editEgressIp"' in html
+    script = (Path(module.BASE_DIR) / "static/app.js").read_text()
+    assert "egress_ip" in script and "api/server-ips" in script
 
 
 def test_shadowsocks_password_rules_and_invalid_method(panel):

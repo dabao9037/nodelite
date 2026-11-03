@@ -30,6 +30,11 @@
         <div class="form-grid">
           <label>节点名称<input id="name" required placeholder="例如：新加坡-01"></label>
           <label>端口<input id="port" type="number" min="1" max="65535" placeholder="留空自动生成"></label>
+          <label>出口 IP（可选）
+            <input id="egressIp" list="egressIpOptions" autocomplete="off" placeholder="留空使用默认出口">
+            <datalist id="egressIpOptions"></datalist>
+            <small>多 IP 服务器可指定该节点使用的出口 IP；该地址也会用于节点分享链接和订阅。</small>
+          </label>
           <label class="socks-field" hidden>用户名<input id="username" placeholder="留空自动生成"></label>
           <label class="socks-field" hidden>密码<input id="password" placeholder="留空自动生成"></label>
           <label class="ss-field" hidden>加密方式
@@ -111,6 +116,7 @@
       <input id="editId" type="hidden">
       <h2>编辑节点控制</h2>
       <label>节点名称<input id="editName" required></label>
+      <label>出口 IP（可选）<input id="editEgressIp" list="egressIpOptions" autocomplete="off" placeholder="留空使用默认出口"></label>
       <label>最大设备数<input id="editMaxDevices" type="number" min="1" max="100000" placeholder="留空表示不限"><small>按不同公网 IPv4 计数；同一 NAT 多设备计 1，切网后可能变化。受限节点暂不开放 IPv6。</small></label>
       <label>流量上限 (MB)<input id="editTrafficLimitMb" type="number" min="1" max="1000000000" step="1" placeholder="留空表示不限"><small>修改上限不会清除已用流量；因流量超限停用时，提高到当前用量以上或清除上限会自动启用（已到期或手动停用除外）。</small></label>
       <label>有效期

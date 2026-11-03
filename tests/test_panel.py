@@ -1743,6 +1743,47 @@ def test_subscription_base64_without_cookie_matches_share_links(panel, monkeypat
         assert "private-reality-key" not in response.text and "private-reality-key" not in decoded
 
 
+def test_share_links_follow_request_ip_when_public_host_is_stale(panel, monkeypatch):
+    module, _ = panel
+    # 模拟服务器换 IP 后配置里仍是旧地址，而管理员用新 IP 打开面板。
+    monkeypatch.setattr(module, "PUBLIC_HOST", "8.8.8.8")
+    client = TestClient(module.app, base_url="http://1.1.1.1:23000")
+    login(client)
+    created = client.post("/api/nodes", json={"name": "stale ip", "protocol": "socks", "port": 22091})
+    assert created.status_code == 201, created.text
+    node = created.json()
+    assert urlsplit(node["link"]).hostname == "1.1.1.1"
+    listed = client.get("/api/nodes").json()
+    assert [urlsplit(item["link"]).hostname for item in listed] == ["1.1.1.1"]
+
+    public = TestClient(module.app, base_url="http://1.1.1.1:23000")
+    response = public.get(f"/{node['sub_path']}", headers={"user-agent": "v2rayN/7.0"})
+    assert response.status_code == 200
+    decoded = base64.b64decode(response.text, validate=True).decode()
+    assert "@1.1.1.1:" in decoded and "8.8.8.8" not in decoded
+    clash = public.get(f"/{node['sub_path']}?target=clash")
+    assert '"server": "1.1.1.1"' in clash.text and "8.8.8.8" not in clash.text
+
+
+def test_share_links_ignore_loopback_request_host(panel, monkeypatch):
+    module, _ = panel
+    monkeypatch.setattr(module, "PUBLIC_HOST", "8.8.8.8")
+    client = TestClient(module.app, base_url="http://127.0.0.1:23000")
+    login(client)
+    created = client.post("/api/nodes", json={"name": "tunnel", "protocol": "socks", "port": 22093})
+    assert created.status_code == 201, created.text
+    assert urlsplit(created.json()["link"]).hostname == "8.8.8.8"
+
+
+def test_share_links_keep_configured_domain(panel, monkeypatch):
+    module, client = panel
+    monkeypatch.setattr(module, "PUBLIC_HOST", "node.example.test")
+    login(client)
+    created = client.post("/api/nodes", json={"name": "domain", "protocol": "socks", "port": 22092})
+    assert created.status_code == 201, created.text
+    assert urlsplit(created.json()["link"]).hostname == "node.example.test"
+
+
 def test_subscription_clash_yaml_by_user_agent(panel, monkeypatch):
     module, client = panel
     socks, ss, reality = _three_nodes(module, client, monkeypatch)

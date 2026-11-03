@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import hmac
 import importlib
+import ipaddress
 import json
 import os
 import re
@@ -1135,10 +1136,49 @@ def shutdown():
     STOP_EVENT.set()
 
 
-def link_for(row):
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip().strip("[]").split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
+
+
+def _is_public_ip(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value.strip().strip("[]").split("%", 1)[0]).is_global
+    except ValueError:
+        return False
+
+
+def _same_ip(left: str, right: str) -> bool:
+    try:
+        return ipaddress.ip_address(left.strip().strip("[]")) == ipaddress.ip_address(right.strip().strip("[]"))
+    except ValueError:
+        return False
+
+
+def advertised_host(request: Request | None = None) -> str:
+    """Host clients should use for node links.
+
+    ``PUBLIC_HOST`` is written at install time. When a VPS changes IP, the
+    operator reaches the panel at the new address while the stored value still
+    holds the old IP. In that case the request's IP literal is the live address;
+    domains and explicitly configured hosts are left untouched.
+    """
+    configured = PUBLIC_HOST.strip()
+    if request is None or not _is_public_ip(configured):
+        return configured
+    requested = (request.url.hostname or "").strip().strip("[]")
+    if requested and _is_public_ip(requested) and not _same_ip(requested, configured):
+        return requested
+    return configured
+
+
+def link_for(row, host: str | None = None):
     cfg = json.loads(row["config"])
     name = quote(row["name"], safe="")
-    host = PUBLIC_HOST.strip()
+    host = (host or PUBLIC_HOST).strip()
     if row["protocol"] == "socks":
         username = quote(cfg["username"], safe="")
         password = quote(cfg["password"], safe="")
@@ -1162,7 +1202,7 @@ def link_for(row):
     return f"vless://{cfg['uuid']}@{host}:{row['port']}?{query}#{name}"
 
 
-def serial(row):
+def serial(row, host: str | None = None):
     cfg = json.loads(row["config"])
     if row["protocol"] == "shadowsocks":
         cfg["method"] = config_shadowsocks_method(cfg)
@@ -1177,7 +1217,7 @@ def serial(row):
         "enabled": bool(row["enabled"]),
         "disabled_reason": row["disabled_reason"],
         "config": {key: value for key, value in cfg.items() if key != "private_key"},
-        "link": link_for(row),
+        "link": link_for(row, host),
         "qr": f"api/nodes/{row['id']}/qr",
         # Admin-only: the subscription token is a bearer secret. The UI builds
         # the absolute URL from window.location plus this relative path.
@@ -1301,9 +1341,10 @@ def home(_=Depends(require_admin)):
 
 
 @app.get("/api/nodes")
-def nodes(_=Depends(require_admin)):
+def nodes(request: Request, _=Depends(require_admin)):
+    host = advertised_host(request)
     with closing(connect_db()) as conn:
-        return [serial(row) for row in conn.execute("SELECT * FROM nodes ORDER BY id DESC").fetchall()]
+        return [serial(row, host) for row in conn.execute("SELECT * FROM nodes ORDER BY id DESC").fetchall()]
 
 
 @app.get("/api/nodes/telemetry")
@@ -1316,7 +1357,7 @@ def nodes_telemetry(_=Depends(require_admin)):
 
 
 @app.post("/api/nodes", status_code=201)
-def create(payload: NodeInput, _=Depends(require_admin)):
+def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
     protocol = payload.protocol.lower().strip()
     if protocol not in {"socks", "shadowsocks", "vless"}:
         raise HTTPException(422, "不支持的协议")
@@ -1367,11 +1408,11 @@ def create(payload: NodeInput, _=Depends(require_admin)):
         apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
-        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
+        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone(), advertised_host(request))
 
 
 @app.put("/api/nodes/{node_id}")
-def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
+def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(require_admin)):
     expires_at = resolve_expiration(payload, creating=False)
     with STATE_LOCK, closing(connect_db()) as conn:
         old = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
@@ -1423,11 +1464,11 @@ def update(node_id: int, payload: NodeUpdate, _=Depends(require_admin)):
         apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
-        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
+        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone(), advertised_host(request))
 
 
 @app.post("/api/nodes/{node_id}/toggle")
-def toggle(node_id: int, _=Depends(require_admin)):
+def toggle(node_id: int, request: Request, _=Depends(require_admin)):
     with STATE_LOCK, closing(connect_db()) as conn:
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
         if not row:
@@ -1454,11 +1495,11 @@ def toggle(node_id: int, _=Depends(require_admin)):
         apply_runtime(force=True)
         raise
     with closing(connect_db()) as conn:
-        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone())
+        return serial(conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone(), advertised_host(request))
 
 
 @app.post("/api/nodes/{node_id}/traffic/reset")
-def reset_traffic(node_id: int, _=Depends(require_admin)):
+def reset_traffic(node_id: int, request: Request, _=Depends(require_admin)):
     # Query Xray before taking STATE_LOCK; Docker/systemctl calls may be slow.
     stats = query_xray_stats()
     with STATE_LOCK, closing(connect_db()) as conn:
@@ -1502,7 +1543,7 @@ def reset_traffic(node_id: int, _=Depends(require_admin)):
     with TELEMETRY_LOCK:
         RATE_STATE.pop(node_id, None)
         TELEMETRY[node_id] = _telemetry_for_row(row, time.time(), 0)
-    return serial(row)
+    return serial(row, advertised_host(request))
 
 
 @app.delete("/api/nodes/{node_id}", status_code=204)
@@ -1530,12 +1571,12 @@ def delete(node_id: int, _=Depends(require_admin)):
 
 
 @app.get("/api/nodes/{node_id}/qr")
-def qr(node_id: int, _=Depends(require_admin)):
+def qr(node_id: int, request: Request, _=Depends(require_admin)):
     with closing(connect_db()) as conn:
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
     if not row:
         raise HTTPException(404, "节点不存在")
-    return Response(qr_png(link_for(row)), media_type="image/png")
+    return Response(qr_png(link_for(row, advertised_host(request))), media_type="image/png")
 
 
 def qr_png(data: str) -> bytes:
@@ -1586,7 +1627,7 @@ def sub_qr(node_id: int, request: Request, base: str | None = None, _=Depends(re
 
 
 @app.post("/api/nodes/{node_id}/sub/regenerate")
-def regenerate_sub(node_id: int, _=Depends(require_admin)):
+def regenerate_sub(node_id: int, request: Request, _=Depends(require_admin)):
     """Replace the node's subscription token; the old URL stops working at once."""
     with STATE_LOCK, closing(connect_db()) as conn:
         cursor = conn.execute(
@@ -1596,7 +1637,7 @@ def regenerate_sub(node_id: int, _=Depends(require_admin)):
         if not cursor.rowcount:
             raise HTTPException(404, "节点不存在")
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
-    return serial(row)
+    return serial(row, advertised_host(request))
 
 
 # --- Public subscription endpoint -------------------------------------------
@@ -1696,12 +1737,12 @@ def clash_proxy_name(row) -> str:
     return f"{name} ({row['id']})" if name.upper() in CLASH_RESERVED_NAMES else name
 
 
-def clash_proxy(row) -> dict:
+def clash_proxy(row, host: str | None = None) -> dict:
     """mihomo proxy mapping for one node (values are already YAML-safe)."""
     cfg = json.loads(row["config"])
     proxy = {
         "name": clash_proxy_name(row),
-        "server": PUBLIC_HOST.strip(),
+        "server": (host or PUBLIC_HOST).strip(),
         "port": int(row["port"]),
     }
     if row["protocol"] == "socks":
@@ -1735,9 +1776,9 @@ def _yaml_value(value) -> str:
     return _yaml_str(value)
 
 
-def clash_config(rows) -> str:
+def clash_config(rows, host: str | None = None) -> str:
     """Complete mihomo config. Proxies are JSON-style flow mappings (valid YAML)."""
-    proxies = [clash_proxy(row) for row in rows]
+    proxies = [clash_proxy(row, host) for row in rows]
     lines = [
         "# NodeLite subscription (mihomo / Clash Meta)",
         "mixed-port: 7890",
@@ -1758,9 +1799,9 @@ def clash_config(rows) -> str:
     return "\n".join(lines)
 
 
-def singbox_outbound(row) -> dict:
+def singbox_outbound(row, host: str | None = None) -> dict:
     cfg = json.loads(row["config"])
-    outbound = {"tag": clash_proxy_name(row), "server": PUBLIC_HOST.strip(), "server_port": int(row["port"])}
+    outbound = {"tag": clash_proxy_name(row), "server": (host or PUBLIC_HOST).strip(), "server_port": int(row["port"])}
     if row["protocol"] == "socks":
         outbound.update(type="socks", version="5", username=cfg["username"], password=cfg["password"])
     elif row["protocol"] == "shadowsocks":
@@ -1783,9 +1824,9 @@ def singbox_outbound(row) -> dict:
     return outbound
 
 
-def singbox_config(rows) -> str:
+def singbox_config(rows, host: str | None = None) -> str:
     """sing-box 1.11+ profile: TUN + local mixed inbound, selector, direct."""
-    outbounds = [singbox_outbound(row) for row in rows]
+    outbounds = [singbox_outbound(row, host) for row in rows]
     tags = [item["tag"] for item in outbounds]
     config = {
         "log": {"level": "info"},
@@ -1816,12 +1857,12 @@ def subscription_userinfo(row) -> str:
     return f"upload={upload}; download={download}; total={limit}; expire={expire}"
 
 
-def subscription_body(rows, fmt: str) -> tuple[str, str]:
+def subscription_body(rows, fmt: str, host: str | None = None) -> tuple[str, str]:
     if fmt == "clash":
-        return clash_config(rows), "text/yaml; charset=utf-8"
+        return clash_config(rows, host), "text/yaml; charset=utf-8"
     if fmt == "singbox":
-        return singbox_config(rows), "application/json; charset=utf-8"
-    links = "\n".join(link_for(row) for row in rows)
+        return singbox_config(rows, host), "application/json; charset=utf-8"
+    links = "\n".join(link_for(row, host) for row in rows)
     return base64.b64encode(links.encode()).decode(), "text/plain; charset=utf-8"
 
 
@@ -1847,7 +1888,7 @@ def subscription(token: str, request: Request):
         return no_store(Response(status_code=404))
     fmt = subscription_format(request)
     rows = [row] if subscription_active(row, int(now)) else []
-    body, media_type = subscription_body(rows, fmt)
+    body, media_type = subscription_body(rows, fmt, advertised_host(request))
     ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", row["name"]).strip("_") or f"nodelite-{row['id']}"
     headers = {
         "Content-Disposition": (

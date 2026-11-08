@@ -74,8 +74,8 @@ test_installer() {
 
 test_installer "$ROOT/install.sh"
 test_installer "$ROOT/install-docker.sh"
+grep -Fq '10. 一键开启 BBR' "$ROOT/install.sh"
 grep -Fq '11. 一键关闭 IPv6' "$ROOT/install.sh"
-grep -Fq '12. 一键开启 BBR + fq' "$ROOT/install.sh"
 grep -Fq '10. 一键关闭 IPv6' "$ROOT/install-docker.sh"
 grep -Fq '11. 一键开启 BBR + fq' "$ROOT/install-docker.sh"
 

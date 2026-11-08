@@ -55,12 +55,12 @@ download_xray() {
   local asset="Xray-linux-${XRAY_ARCH}.zip"
   local direct="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/$asset"
   local payload id api_url
-  if curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+  if curl -fL --retry 3 --retry-delay 2 \
     --connect-timeout 15 --max-time 600 "$direct" -o "$BUILD/xray.zip"; then
     return 0
   fi
   echo "Xray direct download failed; retrying via GitHub API asset" >&2
-  payload="$(curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+  payload="$(curl -fsSL --retry 3 --retry-delay 2 \
     --connect-timeout 15 --max-time 60 \
     -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/repos/XTLS/Xray-core/releases/tags/v${XRAY_VERSION}" 2>/dev/null || true)"
@@ -68,7 +68,7 @@ download_xray() {
   id="$(printf '%s' "$payload" | grep -B40 -F "\"browser_download_url\": \"$direct\"" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
   [[ "$id" =~ ^[0-9]+$ ]] || { echo "cannot resolve Xray asset id" >&2; return 1; }
   api_url="https://api.github.com/repos/XTLS/Xray-core/releases/assets/$id"
-  curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+  curl -fL --retry 3 --retry-delay 2 \
     --connect-timeout 15 --max-time 600 \
     -H 'Accept: application/octet-stream' "$api_url" -o "$BUILD/xray.zip"
 }

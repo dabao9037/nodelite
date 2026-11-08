@@ -46,6 +46,322 @@ set_key() { local f="$1" k="$2" v="$3" t; t="$(mktemp)"; [[ ! -f "$f" ]] || grep
 have_systemd() { command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; }
 service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"; }
 
+# ==================== 屏蔽 SVCB(64) / HTTPS(65) DNS 记录 ====================
+# 这两类记录会把 ipv4hint / ipv6hint（真实地址）和 ech（加密 SNI 配置）直接写进
+# DNS 应答。在 Fake-IP 代理体系下，客户端拿到 hint 会绕过假 IP 直连，alpn=h3 又会
+# 把流量推进 QUIC(UDP/443)，结果是既走不成代理，也把出口 IP 与 DNS 一起漏出去。
+#
+# 过滤掉这两种 RR 后，客户端按 RFC 9460/9461 自动回退到 A/AAAA + h2，业务功能不受
+# 影响；代价只是失去 HTTP/3 与 ECH。
+#
+# 依赖 dnsmasq >= 2.86（filter-rr 在 2.86 引入）。版本不够时跳过而不是把系统 DNS
+# 改坏。关闭方式：SVCB_BLOCK=0，或执行 dns-unblock 子命令。
+# ==========================================================================
+SVCB_BLOCK="${SVCB_BLOCK:-1}"
+SVCB_ETC="${SVCB_ETC:-/etc}"
+SVCB_RESOLV="${SVCB_RESOLV:-/etc/resolv.conf}"
+SVCB_CONF="${SVCB_CONF:-$SVCB_ETC/svcb-dns-filter.conf}"
+SVCB_UNIT="${SVCB_UNIT:-$SVCB_ETC/systemd/system/svcb-dns-filter.service}"
+SVCB_BAK="${SVCB_BAK:-$SVCB_RESOLV.svcb-block.bak}"
+SVCB_MODE_FILE="${SVCB_MODE_FILE:-$SVCB_ETC/svcb-dns-filter.mode}"
+SVCB_RESOLVED_DROPIN="${SVCB_RESOLVED_DROPIN:-$SVCB_ETC/systemd/resolved.conf.d/90-svcb-block.conf}"
+SVCB_NM_DROPIN="${SVCB_NM_DROPIN:-$SVCB_ETC/NetworkManager/conf.d/90-svcb-block.conf}"
+SVCB_SHARED_CONF="${SVCB_SHARED_CONF:-$SVCB_ETC/dnsmasq.d/svcb-block.conf}"
+SVCB_LISTEN="${SVCB_LISTEN:-127.0.0.1}"
+SVCB_TAG="svcb-dns-filter"
+SVCB_SVC="$SVCB_TAG.service"
+
+svcb_version() {
+  dnsmasq --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p'
+}
+
+svcb_version_ok() {
+  local v; v="$(svcb_version || true)"
+  [ -n "$v" ] || return 1
+  [ "$(printf '%s\n2.86\n' "$v" | sort -V 2>/dev/null | sed -n '1p')" = "2.86" ]
+}
+
+svcb_is_on() {
+  [ -f "$SVCB_CONF" ] || [ -f "$SVCB_SHARED_CONF" ]
+}
+
+svcb_active() {
+  systemctl is-active --quiet "$SVCB_SVC" 2>/dev/null
+}
+
+svcb_install_dnsmasq() {
+  info "安装 dnsmasq（SVCB/HTTPS 过滤依赖 filter-rr）"
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsmasq >/dev/null 2>&1 || return 1
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q dnsmasq >/dev/null 2>&1 || return 1
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y -q dnsmasq >/dev/null 2>&1 || return 1
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache dnsmasq >/dev/null 2>&1 || return 1
+  else
+    return 1
+  fi
+  command -v dnsmasq >/dev/null 2>&1
+}
+
+# 沿用系统现有的上游，避免把解析路径换成别处不通的公共 DNS。
+# 必须剔除所有环回地址：本脚本自己就把 resolv.conf 指向 127.0.0.1，
+# 一旦把 127.0.0.1 当成上游就会自环，整台机器的 DNS 立刻死掉。
+svcb_upstreams() {
+  { awk '/^[[:space:]]*nameserver[[:space:]]/{print $2}' "$SVCB_RESOLV" 2>/dev/null || true
+    awk '/^[[:space:]]*nameserver[[:space:]]/{print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
+  } | grep -vE '^127\.|^::1$|^0\.0\.0\.0$|^localhost$' | awk '!seen[$0]++' | sed -n '1,3p'
+}
+
+svcb_backup_resolv() {
+  [ -e "$SVCB_BAK" ] && return 0
+  if [ -L "$SVCB_RESOLV" ]; then
+    printf 'symlink:%s\n' "$(readlink "$SVCB_RESOLV" 2>/dev/null || true)" > "$SVCB_BAK"
+  elif [ -f "$SVCB_RESOLV" ]; then
+    cp -a "$SVCB_RESOLV" "$SVCB_BAK"
+  else
+    printf 'absent\n' > "$SVCB_BAK"
+  fi
+}
+
+svcb_restore_resolv() {
+  [ -e "$SVCB_BAK" ] || return 0
+  if grep -q '^symlink:' "$SVCB_BAK" 2>/dev/null; then
+    ln -sfn "$(sed -n 's/^symlink://p' "$SVCB_BAK")" "$SVCB_RESOLV" 2>/dev/null || true
+  elif grep -q '^absent$' "$SVCB_BAK" 2>/dev/null; then
+    rm -f "$SVCB_RESOLV" 2>/dev/null || true
+  else
+    rm -f "$SVCB_RESOLV" 2>/dev/null || true
+    cp -a "$SVCB_BAK" "$SVCB_RESOLV" 2>/dev/null || true
+  fi
+  rm -f "$SVCB_BAK" 2>/dev/null || true
+}
+
+# systemd-resolved 的 stub 占着 127.0.0.53:53，NetworkManager 会重写 resolv.conf
+svcb_release_53() {
+  if systemctl is-active --quiet systemd-resolved 2>/dev/null && [ ! -f "$SVCB_RESOLVED_DROPIN" ]; then
+    mkdir -p "$(dirname "$SVCB_RESOLVED_DROPIN")" 2>/dev/null || true
+    printf '[Resolve]\nDNSStubListener=no\n' > "$SVCB_RESOLVED_DROPIN"
+    systemctl restart systemd-resolved >/dev/null 2>&1 || true
+  fi
+  if systemctl is-active --quiet NetworkManager 2>/dev/null && [ ! -f "$SVCB_NM_DROPIN" ]; then
+    mkdir -p "$(dirname "$SVCB_NM_DROPIN")" 2>/dev/null || true
+    printf '[main]\ndns=none\n' > "$SVCB_NM_DROPIN"
+    systemctl reload NetworkManager >/dev/null 2>&1 || systemctl restart NetworkManager >/dev/null 2>&1 || true
+  fi
+  sleep 1
+}
+
+svcb_write_conf() {
+  local upstreams="$1" s
+  mkdir -p "$(dirname "$SVCB_CONF")" 2>/dev/null || true
+  {
+    printf '# %s\n' "$SVCB_TAG"
+    printf '# 过滤 SVCB(64)/HTTPS(65)：阻断 Fake-IP 下的 hint 直连与 QUIC 旁路\n'
+    printf 'port=53\n'
+    printf 'no-resolv\n'
+    while IFS= read -r s; do
+      [ -n "$s" ] && printf 'server=%s\n' "$s"
+    done <<< "$upstreams"
+    printf 'listen-address=%s\n' "$SVCB_LISTEN"
+    printf 'bind-dynamic\n'
+    printf 'cache-size=2000\n'
+    printf 'filter-rr=HTTPS\n'
+    printf 'filter-rr=SVCB\n'
+  } > "$SVCB_CONF"
+  chmod 644 "$SVCB_CONF" 2>/dev/null || true
+}
+
+svcb_write_unit() {
+  local bin; bin="$(command -v dnsmasq || true)"
+  [ -n "$bin" ] || return 1
+  mkdir -p "$(dirname "$SVCB_UNIT")" 2>/dev/null || true
+  cat > "$SVCB_UNIT" <<UNIT
+[Unit]
+Description=SVCB/HTTPS DNS 记录过滤器 (dnsmasq)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$bin --keep-in-foreground --conf-file=$SVCB_CONF
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+svcb_write_resolv() {
+  rm -f "$SVCB_RESOLV" 2>/dev/null || true
+  cat > "$SVCB_RESOLV" <<RESOLV
+# $SVCB_TAG: 已过滤 SVCB/HTTPS 记录
+nameserver 127.0.0.1
+options timeout:2 attempts:3
+RESOLV
+  chmod 644 "$SVCB_RESOLV" 2>/dev/null || true
+}
+
+svcb_port_ready() {
+  local _i out=""
+  for _i in 1 2 3 4 5 6 7 8 9 10; do
+    out="$(ss -Hlun 2>/dev/null | awk '{print $4}' | grep -E '(^|:)53$' 2>/dev/null || true)"
+    [ -n "$out" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+svcb_verify() {
+  local a h
+  if ! command -v dig >/dev/null 2>&1; then
+    info "本机未装 dig，跳过查询验证（仅确认服务与端口）"
+    return 0
+  fi
+  # 先用 A 记录证明这条解析链路是通的，否则"查不到 HTTPS"毫无意义
+  a="$(dig +short +time=3 +tries=1 A example.com @127.0.0.1 2>/dev/null | grep -v '^;;' | sed -n '1p' || true)"
+  if [ -z "$a" ]; then
+    warn "无法从 127.0.0.1 解析 A 记录，DNS 链路未就绪"
+    return 1
+  fi
+  h="$(dig +short +time=3 +tries=1 HTTPS example.com @127.0.0.1 2>/dev/null | grep -v '^;;' || true)"
+  [ -z "$h" ] && h="$(dig +short +time=3 +tries=1 SVCB example.com @127.0.0.1 2>/dev/null | grep -v '^;;' || true)"
+  if [ -z "$h" ]; then
+    ok "验证通过：A 记录正常，HTTPS/SVCB 返回空（已过滤）"
+    return 0
+  fi
+  warn "验证未通过，HTTPS/SVCB 仍可解析：$(printf '%s' "$h" | tr '\n' ' ')"
+  return 1
+}
+
+svcb_status() {
+  local v; v="$(svcb_version || true)"
+  info "DNS 过滤状态"
+  printf '  dnsmasq 版本 : %s\n' "${v:-未安装}"
+  printf '  模式文件     : %s\n' "$([ -f "$SVCB_MODE_FILE" ] && cat "$SVCB_MODE_FILE" || echo 未启用)"
+  if svcb_active; then
+    printf '  独立服务     : %s（运行中）\n' "$SVCB_SVC"
+  else
+    printf '  独立服务     : 未运行\n'
+  fi
+  printf '  共享配置     : %s\n' "$([ -f "$SVCB_SHARED_CONF" ] && echo 存在 || echo 无)"
+  printf '  系统解析     : %s\n' "$(awk '/^[[:space:]]*nameserver/{print $2}' "$SVCB_RESOLV" 2>/dev/null | tr '\n' ' ')"
+  printf '  上游         : %s\n' "$(svcb_upstreams | tr '\n' ' ')"
+  svcb_verify || true
+}
+
+# 关闭：停服务、删配置、还原 resolv.conf 与 resolved stub
+svcb_disable() {
+  local mode="dedicated"
+  [ -f "$SVCB_MODE_FILE" ] && mode="$(cat "$SVCB_MODE_FILE" 2>/dev/null || echo dedicated)"
+  if [ "$mode" = "shared" ]; then
+    rm -f "$SVCB_SHARED_CONF" 2>/dev/null || true
+    systemctl reload dnsmasq >/dev/null 2>&1 || systemctl restart dnsmasq >/dev/null 2>&1 || true
+  else
+    systemctl disable --now "$SVCB_SVC" >/dev/null 2>&1 || true
+    rm -f "$SVCB_UNIT" "$SVCB_CONF" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  rm -f "$SVCB_RESOLVED_DROPIN" "$SVCB_NM_DROPIN" 2>/dev/null || true
+  if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    systemctl restart systemd-resolved >/dev/null 2>&1 || true
+  fi
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    systemctl reload NetworkManager >/dev/null 2>&1 || true
+  fi
+  svcb_restore_resolv
+  rm -f "$SVCB_MODE_FILE" 2>/dev/null || true
+  ok "已关闭 SVCB/HTTPS 记录过滤，DNS 配置已还原"
+}
+
+# 开启：幂等；任何一步失败都回滚，不把系统 DNS 弄坏
+svcb_enable() {
+  if [ "$SVCB_BLOCK" != "1" ]; then
+    info "SVCB_BLOCK=$SVCB_BLOCK，跳过 SVCB/HTTPS 记录过滤"
+    return 0
+  fi
+  if [ "$(id -u)" != "0" ]; then
+    warn "非 root，跳过 SVCB/HTTPS 记录过滤"
+    return 0
+  fi
+  # 幂等：服务在跑、配置还在、或者上次已经标记过模式，都直接返回
+  if svcb_active || svcb_is_on || [ -f "$SVCB_MODE_FILE" ]; then
+    ok "SVCB/HTTPS 记录过滤已启用"
+    return 0
+  fi
+
+  command -v dnsmasq >/dev/null 2>&1 || svcb_install_dnsmasq || {
+    warn "dnsmasq 安装失败，跳过 SVCB/HTTPS 过滤（不影响其他功能）"
+    return 0
+  }
+  if ! svcb_version_ok; then
+    warn "dnsmasq $(svcb_version || echo 未知) 低于 2.86，无 filter-rr，跳过过滤"
+    return 0
+  fi
+
+  local upstreams mode="dedicated"
+  upstreams="$(svcb_upstreams || true)"
+  [ -n "$upstreams" ] || upstreams="${SVCB_UPSTREAM:-1.1.1.1 8.8.8.8}"
+
+  # 已有 dnsmasq 在跑：注入配置，不另建实例、不动别人的 dnsmasq
+  if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+    mode="shared"
+  fi
+
+  svcb_backup_resolv || true
+  svcb_release_53 || true
+
+  if [ "$mode" = "shared" ]; then
+    mkdir -p "$(dirname "$SVCB_SHARED_CONF")" 2>/dev/null || true
+    {
+      printf '# %s\n' "$SVCB_TAG"
+      printf 'filter-rr=HTTPS\n'
+      printf 'filter-rr=SVCB\n'
+    } > "$SVCB_SHARED_CONF"
+    if ! grep -qE '^[[:space:]]*conf-dir=/etc/dnsmasq\.d' /etc/dnsmasq.conf 2>/dev/null; then
+      printf '\nconf-dir=/etc/dnsmasq.d/,*.conf\n' >> /etc/dnsmasq.conf 2>/dev/null || true
+    fi
+    if ! systemctl restart dnsmasq >/dev/null 2>&1; then
+      warn "现有 dnsmasq 重启失败，回滚"
+      rm -f "$SVCB_SHARED_CONF" 2>/dev/null || true
+      svcb_restore_resolv
+      return 0
+    fi
+  else
+    # 发行版自带 unit 先让位，避免抢 53
+    if systemctl is-enabled --quiet dnsmasq 2>/dev/null; then
+      systemctl disable --now dnsmasq >/dev/null 2>&1 || true
+    fi
+    svcb_write_conf "$upstreams" || { warn "写配置失败，跳过"; svcb_restore_resolv; return 0; }
+    svcb_write_unit || { warn "写 service 失败，跳过"; rm -f "$SVCB_CONF"; svcb_restore_resolv; return 0; }
+    if ! systemctl enable --now "$SVCB_SVC" >/dev/null 2>&1; then
+      warn "过滤服务启动失败，回滚"
+      systemctl disable --now "$SVCB_SVC" >/dev/null 2>&1 || true
+      rm -f "$SVCB_UNIT" "$SVCB_CONF" 2>/dev/null || true
+      systemctl daemon-reload >/dev/null 2>&1 || true
+      svcb_restore_resolv
+      return 0
+    fi
+  fi
+
+  if ! svcb_port_ready; then
+    warn "53 端口未就绪，回滚 DNS 配置"
+    svcb_disable >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  printf '%s\n' "$mode" > "$SVCB_MODE_FILE" 2>/dev/null || true
+  svcb_write_resolv
+  ok "已启用 SVCB/HTTPS 记录过滤（$mode 模式，上游：$(printf '%s' "$upstreams" | tr '\n' ' ')）"
+  svcb_verify || true
+  return 0
+}
+# ================== 屏蔽 SVCB/HTTPS 记录 · 结束 ==================
+
 ensure_tools() {
   local missing=() packages=() cmd
   for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
@@ -501,6 +817,7 @@ JSON
   install_units
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
   wait_healthy
+  svcb_enable || true
   install_shortcuts
   ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
@@ -698,10 +1015,12 @@ menu() {
  11. 一键关闭 IPv6
  12. 卸载 NodeLite
  13. 可选 Docker 兼容安装
+ 14. 屏蔽 SVCB/HTTPS DNS 记录（防 Fake-IP 直连与 QUIC 旁路）
+ 15. 取消 SVCB/HTTPS 屏蔽
   0. 退出
 ===================================================
 EOF
-  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 0) exit;; *) warn "无效选项";; esac; done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 14) svcb_enable;; 15) svcb_disable;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; shortcuts) install_shortcuts;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|uninstall|docker|shortcuts|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; shortcuts) install_shortcuts;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; dns-block) svcb_enable;; dns-unblock) svcb_disable;; dns-status) svcb_status;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|dns-block|dns-unblock|dns-status|uninstall|docker|shortcuts|menu]";; esac

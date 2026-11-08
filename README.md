@@ -159,6 +159,41 @@ bash scripts/build-native-release-container.sh amd64
 
 候选方向集中在学术研究、旅游、二次元、游戏和小众企业，避免把 Apple、Microsoft、BBC 等大型通用站点作为内置预设。发布前检查 DNS、443、TLS 1.3 和证书主机名匹配；Reality 目标的实际可用性仍受服务器出口与站点策略影响，部署后应使用真实客户端测试。
 
+## DNS：屏蔽 SVCB(64) / HTTPS(65) 记录（默认开启）
+
+安装时会在本机起一个独立的 dnsmasq 实例（机器上已有 dnsmasq 在跑时则只注入配置、不另起实例），只做一件事：**丢弃 SVCB(Type 64) 与 HTTPS(Type 65) 两类 DNS 记录**。
+
+为什么：
+
+- 这两类 RR 的应答里带 `ipv4hint` / `ipv6hint`（**真实地址**）和 `ech`（加密 SNI 配置）。
+- 在 Fake-IP 代理体系下，客户端拿到 hint 会直接按真实 IP 连，绕过假 IP 与域名分流；`alpn=h3` 又会把流量推进 QUIC(UDP/443)，于是出口 IP 和 DNS 一起漏。
+- 过滤后客户端按 RFC 9460/9461 自动回退 A/AAAA + h2，业务功能不受影响，代价只是失去 HTTP/3 与 ECH。
+
+行为与保护：
+
+- 依赖 dnsmasq >= 2.86（`filter-rr` 自 2.86 起提供）。版本不够时**跳过**并告警，不会把系统 DNS 改坏。
+- 会把 `/etc/resolv.conf` 备份后指向 `127.0.0.1`，同时让出 53 端口：systemd-resolved 写 `DNSStubListener=no`，NetworkManager 写 `dns=none`。
+- 任何一步失败立即回滚、恢复原 resolv.conf。
+- 上游 DNS 沿用系统原有配置（自动剔除环回地址，不会自环）。
+- 只过滤 DNS，不封 UDP/443；浏览器已缓存的 Alt-Svc 仍可能继续走 QUIC，需要时在 `chrome://net-internals/#sockets` 里 Flush sockets。
+
+开关：
+
+```bash
+SVCB_BLOCK=0 bash install.sh install   # 本次安装不做屏蔽（默认 1 = 做）
+bash install.sh dns-block        # 只开屏蔽
+bash install.sh dns-status       # 看状态并实测
+bash install.sh dns-unblock      # 关闭并还原
+```
+
+验证：
+
+```bash
+dig +short A     example.com @127.0.0.1   # 有答案
+dig +short HTTPS example.com @127.0.0.1   # 空 = 已过滤
+```
+
+
 ## TCPFit
 
 TCPFit 来自 <https://github.com/Kylin010/tcpfit>，不是 NodeLite 组成部分。NodeLite 永不自动执行；菜单会先说明网络/SSH 风险并确认，再固定上游 commit、做 `bash -n` 并显示 SHA256。请准备云控制台/KVM 回退。

@@ -59,6 +59,7 @@ NODELITE_TEST_DIRECT="$TMP/direct" \
 NODELITE_TEST_API="$TMP/api" \
 NODELITE_TEST_JSON="$TMP/release.json" \
 NODELITE_TEST_PAYLOAD="$TMP/payload" \
+sudo --preserve-env=PATH,NODELITE_TEST_DIRECT,NODELITE_TEST_API,NODELITE_TEST_JSON,NODELITE_TEST_PAYLOAD \
 bash -c '
   set -Eeuo pipefail
   source "$1"

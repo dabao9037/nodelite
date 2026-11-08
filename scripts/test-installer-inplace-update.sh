@@ -90,7 +90,7 @@ case "${1:-}" in
 esac
 FAKE_SYSTEMCTL
 chmod 0755 /test-bin/systemctl
-for command_name in iptables ip ss; do
+for command_name in iptables ip ss nft; do
   printf '#!/bin/sh\nexit 0\n' >"/test-bin/$command_name"
   chmod 0755 "/test-bin/$command_name"
 done

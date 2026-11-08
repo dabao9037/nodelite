@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Administrative tools such as nft, ip and sysctl live in sbin. A root shell
+# started without a login profile (su, cron, some CI/agents) may omit those
+# directories, which previously aborted installation even when nftables was
+# installed. Keep the installer's own PATH complete as well.
+for _dir in /usr/local/sbin /usr/sbin /sbin; do
+  case ":$PATH:" in *":$_dir:"*) ;; *) [[ -d "$_dir" ]] && PATH="$PATH:$_dir" ;; esac
+done
+unset _dir
+export PATH
+
 REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -52,6 +62,38 @@ ensure_tools() {
     yum install -y ca-certificates "${packages[@]}"
   else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
   for cmd in curl tar openssl iptables ip; do command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd"; done
+}
+
+ensure_nft() {
+  local resolved
+  resolved="$(command -v nft 2>/dev/null || true)"
+  if [[ -z "$resolved" ]]; then
+    warn "缺少 nft，正在安装 nftables"
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update && apt-get install -y ca-certificates nftables
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y ca-certificates nftables
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y ca-certificates nftables
+    elif command -v apk >/dev/null 2>&1; then
+      apk add --no-cache ca-certificates nftables
+    elif command -v zypper >/dev/null 2>&1; then
+      zypper --non-interactive install ca-certificates nftables
+    elif command -v pacman >/dev/null 2>&1; then
+      pacman -Sy --noconfirm ca-certificates nftables
+    else
+      die "缺少 nft，且未找到受支持的包管理器；请先安装 nftables 后重试"
+    fi
+    resolved="$(command -v nft 2>/dev/null || true)"
+  fi
+  # The panel runs as a systemd service with a shorter PATH than an
+  # interactive root shell. Publish nft in BIN_DIR so that service can find it
+  # even on distributions that install nft only in /usr/sbin.
+  if [[ -n "$resolved" && "$resolved" != "$BIN_DIR/nft" ]]; then
+    mkdir -p "$BIN_DIR"
+    ln -sf "$resolved" "$BIN_DIR/nft"
+  fi
+  command -v nft >/dev/null 2>&1 || die "nft 安装失败；请先手动安装 nftables 后重试"
 }
 
 ensure_git() {
@@ -114,6 +156,58 @@ latest_tag() {
     sleep $((attempt * 2))
   done
   return 1
+}
+
+api_asset_url() {
+  local tag="$1" asset="$2" payload download_url id
+  download_url="https://github.com/$REPO/releases/download/$tag/$asset"
+  payload="$(curl -fsSL \
+    --connect-timeout 15 --max-time 60 \
+    --retry 3 --retry-all-errors --retry-delay 2 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+    "https://api.github.com/repos/$REPO/releases/tags/$tag?nodelite=$(date +%s)-$RANDOM" 2>/dev/null || true)"
+  [[ -n "$payload" ]] || return 1
+  # The release JSON puts the asset id ~30 lines above browser_download_url.
+  # Do not parse the whole document with a greedy match: the release body may
+  # mention the same filename and the uploader object also has an "id".
+  id="$(printf '%s' "$payload" | grep -B40 -F "\"browser_download_url\": \"$download_url\"" | sed -n 's/.*"id":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  printf 'https://api.github.com/repos/%s/releases/assets/%s\n' "$REPO" "$id"
+}
+
+download_native_asset() {
+  local tag="$1" arch="$2" destination="$3"
+  local asset="nodelite-linux-$arch.tar.gz"
+  local base_url="${NODELITE_ASSET_URL:-https://github.com/$REPO/releases/download/$tag/$asset}"
+  local attempt delay cache_bust url api_url
+  for attempt in 1 2 3; do
+    cache_bust="nodelite=$(date +%s)-$attempt-$RANDOM"
+    url="$base_url"
+    [[ "$url" == *\?* ]] && url="$url&$cache_bust" || url="$url?$cache_bust"
+    if curl -fL \
+      --connect-timeout 15 --max-time 600 \
+      --retry 3 --retry-all-errors --retry-delay 2 \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$url" -o "$destination"; then
+      [[ -s "$destination" ]] || die "下载到的原生发行包为空"
+      return 0
+    fi
+    rm -f "$destination"
+    delay=$((attempt * 2))
+    warn "发行包暂时不可用，${delay} 秒后重试（$attempt/3）"
+    sleep "$delay"
+  done
+  warn "直连发行包连续失败，尝试 GitHub API asset 回退"
+  api_url="$(api_asset_url "$tag" "$asset" || true)"
+  [[ -n "$api_url" ]] || die "无法解析 GitHub API 发行包地址：$base_url"
+  info "回退下载：$api_url"
+  curl -fL \
+    --connect-timeout 15 --max-time 600 \
+    --retry 3 --retry-all-errors --retry-delay 2 \
+    -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$api_url" -o "$destination"
+  [[ -s "$destination" ]] || die "GitHub API 回退下载到的原生发行包为空"
 }
 
 installed_version() {
@@ -367,6 +461,7 @@ show_access() {
 
 install_or_update() {
   ensure_tools
+  ensure_nft
   local old="$INSTALL_DIR/config/nodelite.env" arch tag url tmp host port path user password secret old_internal had_existing=0 release_dir backup_dir
   [[ -f "$old" ]] && had_existing=1
   arch="$(asset_arch)"; tag="$(latest_tag)"; [[ -n "$tag" ]] || die "无法获取最新 GitHub Release"
@@ -379,7 +474,8 @@ install_or_update() {
   secret="${!SECRET_KEY:-$(read_key "$old" "$SECRET_KEY")}"; secret="${secret:-$(random_secret)}"
   old_internal="$(read_key "$old" PANEL_INTERNAL_PORT)"
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
-  info "下载原生发行包：$url"; curl -fL --retry 3 "$url" -o "$tmp/release.tar.gz"
+  info "下载原生发行包：$url"
+  download_native_asset "$tag" "$arch" "$tmp/release.tar.gz"
   release_dir="$tmp/release"; backup_dir="$tmp/runtime-state"
   mkdir -p "$release_dir"
   tar -xzf "$tmp/release.tar.gz" -C "$release_dir"

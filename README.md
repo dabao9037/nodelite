@@ -12,7 +12,7 @@ NodeLite 现在默认采用类似 x-ui 的原生安装：下载 GitHub Release �
 - Panel 仅监听 `127.0.0.1:18080`；Gateway 在公开端口监听并只转发随机 `ACCESS_PATH`
 - Netguard 原生 daemon；数据库尚未创建时可启动，按节点端口限制当前活动的不同来源 IPv4/IPv6 地址数量（同一 NAT 计 1，切网可能变化），通过私有 nftables 动态集合持续 reconcile，集合满时拒绝新来源，活动超时后自动释放，退出和卸载均 rollback
 
-支持 linux-amd64 和 linux-arm64；安装器会检测架构并优先下载最新 Release 的 `nodelite-linux-<arch>.tar.gz`。目标机只在缺少 `curl`/`tar`/`openssl` 等基础工具时安装少量软件包。
+支持 linux-amd64 和 linux-arm64；安装器会检测架构并优先下载最新 Release 的 `nodelite-linux-<arch>.tar.gz`。目标机只在缺少 `curl`/`tar`/`openssl`/`nftables` 等基础工具时安装少量软件包；GitHub 直连失败时会自动改用 GitHub API asset 下载。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/dabao9037/nodelite/main/install.sh)

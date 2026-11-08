@@ -82,10 +82,13 @@ jobs:
           test "$asset_count" -eq 4
           work=$(mktemp -d)
           cd "$work"
+          # GitHub's release download edge intermittently returns 504 to CI.
+          # gh release download uses the API asset endpoint, the same fallback
+          # the installer now uses when the public download URL fails.
+          gh release download "$RELEASE_TAG" --dir "$work" --clobber
           for arch in amd64 arm64; do
-            base="https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/nodelite-linux-$arch.tar.gz"
-            curl -fL --retry 5 --retry-delay 2 "$base" -o "nodelite-linux-$arch.tar.gz"
-            curl -fL --retry 5 --retry-delay 2 "$base.sha256" -o "nodelite-linux-$arch.tar.gz.sha256"
+            test -s "nodelite-linux-$arch.tar.gz"
+            test -s "nodelite-linux-$arch.tar.gz.sha256"
             expected=$(awk '{print $1}' "nodelite-linux-$arch.tar.gz.sha256")
             actual=$(sha256sum "nodelite-linux-$arch.tar.gz" | awk '{print $1}')
             test "$expected" = "$actual"

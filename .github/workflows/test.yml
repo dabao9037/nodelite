@@ -93,7 +93,7 @@ jobs:
           assert 'inputs.release_tag' in workflow
           assert 'github.ref_name' not in workflow
           assert 'verify-published-release:' in workflow
-          assert 'curl -fL --retry 5' in workflow
+          assert 'gh release download' in workflow
           assert 'PUBLIC_NATIVE_RELEASE_VERIFIED' in workflow
 
           # The release tag must reach the container build, otherwise VERSION

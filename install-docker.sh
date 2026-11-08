@@ -131,6 +131,13 @@ svcb_install_dnsmasq() {
 svcb_upstreams() {
   { awk '/^[[:space:]]*nameserver[[:space:]]/{print $2}' "$SVCB_RESOLV" 2>/dev/null || true
     awk '/^[[:space:]]*nameserver[[:space:]]/{print $2}' /run/systemd/resolve/resolv.conf 2>/dev/null || true
+    # 第三来源：本脚本自己写下的 resolv.conf 备份。
+    # 一旦 SVCB_RESOLV 已被改成 127.0.0.1，前两个来源就都是空/环回，只剩这份还留着
+    # 真实上游 —— 历史版本正是漏了这一步，导致 shared 模式下 dnsmasq 上游为空。
+    if [ -f "$SVCB_BAK" ]; then
+      grep -vE '^(symlink:|absent$)' "$SVCB_BAK" 2>/dev/null \
+        | awk '/^[[:space:]]*nameserver[[:space:]]/{print $2}' || true
+    fi
   } | grep -vE '^127\.|^::1$|^0\.0\.0\.0$|^localhost$' | awk '!seen[$0]++' | sed -n '1,3p'
 }
 
@@ -297,6 +304,36 @@ svcb_disable() {
   ok "已关闭 SVCB/HTTPS 记录过滤，DNS 配置已还原"
 }
 
+# 修复历史版本写下的「半成品」shared 配置（缺 no-resolv + server=）。
+#
+# 判定依据只看 no-resolv：新版本一定会写它，旧版本一定没有。命中就整份重写成
+# 带上游的形态并重启 dnsmasq —— 已坏的机器跑一次 dns-block 即可自愈，不必手工救。
+# 恒返回 0，不阻断 svcb_enable 后续流程。
+svcb_repair_shared() {
+  [ -f "$SVCB_SHARED_CONF" ] || return 0
+  grep -qE '^[[:space:]]*no-resolv' "$SVCB_SHARED_CONF" 2>/dev/null && return 0
+  local ups; ups="$(svcb_upstreams || true)"
+  [ -n "$ups" ] || ups="${SVCB_UPSTREAM:-1.1.1.1 8.8.8.8}"
+  info "检测到旧版 shared DNS 配置缺上游（会导致整机解析失败），正在修复"
+  {
+    printf '# %s\n' "$SVCB_TAG"
+    printf '# 上游显式钉死（修复版）：resolv.conf 已指向 127.0.0.1，不能再当上游来源\n'
+    printf 'no-resolv\n'
+    printf 'no-poll\n'
+    while IFS= read -r _svcb_up; do
+      if [ -n "$_svcb_up" ]; then printf 'server=%s\n' "$_svcb_up"; fi
+    done <<< "$ups"
+    printf 'filter-rr=HTTPS\n'
+    printf 'filter-rr=SVCB\n'
+  } > "$SVCB_SHARED_CONF"
+  if systemctl restart dnsmasq >/dev/null 2>&1; then
+    ok "shared DNS 配置已修复（上游：$(printf '%s' "$ups" | tr '\n' ' ')）"
+  else
+    warn "dnsmasq 重启失败，配置已写好，下次启用时会再试一次"
+  fi
+  return 0
+}
+
 # 开启：幂等；任何一步失败都回滚，不把系统 DNS 弄坏
 svcb_enable() {
   if [ "$SVCB_BLOCK" != "1" ]; then
@@ -307,6 +344,10 @@ svcb_enable() {
     warn "非 root，跳过 SVCB/HTTPS 记录过滤"
     return 0
   fi
+  # 自愈：历史版本的 shared 配置只写了 filter-rr，没写 no-resolv/server=，
+  # 而 svcb_write_resolv 又把 resolv.conf 指向 127.0.0.1 —— 于是 dnsmasq 上游为空、
+  # 整机解析 REFUSED（2026-11-08 秘书3 事故）。每次启用前先补一次，幂等。
+  svcb_repair_shared
   # 幂等：服务在跑、配置还在、或者上次已经标记过模式，都直接返回
   if svcb_active || svcb_is_on || [ -f "$SVCB_MODE_FILE" ]; then
     ok "SVCB/HTTPS 记录过滤已启用"
@@ -338,6 +379,14 @@ svcb_enable() {
     mkdir -p "$(dirname "$SVCB_SHARED_CONF")" 2>/dev/null || true
     {
       printf '# %s\n' "$SVCB_TAG"
+      printf '# 上游必须显式钉死：下面 svcb_write_resolv 会把 /etc/resolv.conf 指向\n'
+      printf '# 127.0.0.1，若 dnsmasq 仍按 resolv.conf 取上游就是自环，上游列表为空，\n'
+      printf '# 整机域名解析一律 REFUSED（2026-11-08 秘书3「更新后没网」事故）。\n'
+      printf 'no-resolv\n'
+      printf 'no-poll\n'
+      while IFS= read -r _svcb_up; do
+        if [ -n "$_svcb_up" ]; then printf 'server=%s\n' "$_svcb_up"; fi
+      done <<< "$upstreams"
       printf 'filter-rr=HTTPS\n'
       printf 'filter-rr=SVCB\n'
     } > "$SVCB_SHARED_CONF"
@@ -376,7 +425,13 @@ svcb_enable() {
   printf '%s\n' "$mode" > "$SVCB_MODE_FILE" 2>/dev/null || true
   svcb_write_resolv
   ok "已启用 SVCB/HTTPS 记录过滤（$mode 模式，上游：$(printf '%s' "$upstreams" | tr '\n' ' ')）"
-  svcb_verify || true
+  # 验证失败必须回滚，不能把机器留在一个「过滤生效但解析全死」的状态。
+  # 宁可暂时没有 DNS 过滤，也不能让转发机失去解析能力（2026-11-08 教训）。
+  if ! svcb_verify; then
+    warn "验证未通过：解析链路不可用，回滚 DNS 配置以免整机断网"
+    svcb_disable >/dev/null 2>&1 || true
+    return 0
+  fi
   return 0
 }
 # ================== 屏蔽 SVCB/HTTPS 记录 · 结束 ==================

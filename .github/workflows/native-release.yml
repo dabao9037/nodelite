@@ -85,7 +85,7 @@ jobs:
           # GitHub's release download edge intermittently returns 504 to CI.
           # gh release download uses the API asset endpoint, the same fallback
           # the installer now uses when the public download URL fails.
-          gh release download "$RELEASE_TAG" --dir "$work" --clobber
+          gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" --dir "$work" --clobber
           for arch in amd64 arm64; do
             test -s "nodelite-linux-$arch.tar.gz"
             test -s "nodelite-linux-$arch.tar.gz.sha256"

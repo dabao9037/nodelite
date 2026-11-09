@@ -108,7 +108,7 @@ EOF
     chmod 0755 "$target"
     ok "快捷命令已安装：node"
   else
-    warn "检测到已有 node 命令：$existing，未覆盖；可使用 nodelite 进入菜单"
+    warn "检测到已有 node 命令：${existing}，未覆盖；可使用 nodelite 进入菜单"
   fi
 }
 

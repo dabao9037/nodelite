@@ -318,7 +318,7 @@ svcb_repair_shared() {
 # 开启：幂等；任何一步失败都回滚，不把系统 DNS 弄坏
 svcb_enable() {
   if [ "$SVCB_BLOCK" != "1" ]; then
-    info "SVCB_BLOCK=$SVCB_BLOCK，跳过 SVCB/HTTPS 记录过滤"
+    info "SVCB_BLOCK=${SVCB_BLOCK}，跳过 SVCB/HTTPS 记录过滤"
     return 0
   fi
   if [ "$(id -u)" != "0" ]; then
@@ -494,7 +494,7 @@ asset_arch() {
 validate_release_compatibility() {
   local release_dir="$1" expected_arch="$2" package_arch required_glibc host_glibc highest
   package_arch="$(cat "$release_dir/ARCH" 2>/dev/null || true)"
-  [[ "$package_arch" == "$expected_arch" ]] || die "发行包架构不匹配：需要 $expected_arch，实际 ${package_arch:-未知}"
+  [[ "$package_arch" == "$expected_arch" ]] || die "发行包架构不匹配：需要 ${expected_arch}，实际 ${package_arch:-未知}"
   for item in bin/nodelite-panel bin/nodelite-gateway bin/nodelite-netguard bin/xray; do
     [[ -x "$release_dir/$item" ]] || die "发行包缺少可执行文件：$item"
   done
@@ -503,8 +503,8 @@ validate_release_compatibility() {
   host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
   [[ "$host_glibc" =~ ^[0-9]+\.[0-9]+$ ]] || die "无法检测当前系统 glibc 版本"
   highest="$(printf '%s\n%s\n' "$required_glibc" "$host_glibc" | sort -V | tail -n1)"
-  [[ "$highest" == "$host_glibc" ]] || die "当前系统 glibc $host_glibc 低于发行包要求 $required_glibc；尚未停止或替换现有服务"
-  info "发行包兼容性检查通过：架构=$package_arch，系统 glibc=$host_glibc，要求≥$required_glibc"
+  [[ "$highest" == "$host_glibc" ]] || die "当前系统 glibc $host_glibc 低于发行包要求 ${required_glibc}；尚未停止或替换现有服务"
+  info "发行包兼容性检查通过：架构=${package_arch}，系统 glibc=${host_glibc}，要求≥$required_glibc"
 }
 latest_tag() {
   [[ -n "${NODELITE_VERSION:-}" ]] && { echo "$NODELITE_VERSION"; return; }
@@ -630,7 +630,10 @@ install_release_code() {
     [[ -e "$item" || -L "$item" ]] || continue
     name="${item##*/}"
     case "$name" in
-      config|data|xray-config) continue ;;
+      # Keep the management script that is actually running.  The release
+      # tarball can contain an older install.sh; copying it would silently
+      # reintroduce fixed bugs on the next `nodelite` invocation.
+      config|data|xray-config|install.sh) continue ;;
     esac
     rm -rf -- "$INSTALL_DIR/$name"
     cp -a -- "$item" "$INSTALL_DIR/"
@@ -678,7 +681,7 @@ preflight_port() {
   if port_in_use "$port" && ! service_ctl is-active --quiet nodelite-gateway.service 2>/dev/null; then
     warn "访问端口 $port 已被其他程序占用："
     ss -H -ltnp 2>/dev/null | awk -v suffix=":$port" '$4 ~ suffix "$"' >&2 || true
-    die "请先释放端口 $port，或用 PANEL_PORT=其他端口 重新安装"
+    die "请先释放端口 ${port}，或用 PANEL_PORT=其他端口 重新安装"
   fi
 }
 
@@ -704,7 +707,7 @@ EOF
   if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
     if [[ ! -f "$target" ]] || ! cmp -s "$alias" "$target"; then install -m 0755 "$alias" "$target"; changed=1; fi
     (( changed == 0 )) || ok "快捷命令已安装：node"
-  else warn "检测到已有 Node.js：$existing，未覆盖；请使用 nodelite"; fi
+  else warn "检测到已有 Node.js：${existing}，未覆盖；请使用 nodelite"; fi
 }
 
 bootstrap_menu() {
@@ -857,12 +860,14 @@ install_or_update() {
   preflight_port "$port"
   choose_internal_port "$old_internal"
   install_release_code "$release_dir"
+  # The running script is the source of truth for the management CLI.  Do not
+  # compare it to the tarball copy (that copy is intentionally not installed).
+  save_installer "$INSTALL_DIR/install.sh"
   [[ -s "$INSTALL_DIR/VERSION" ]] || die "安装后的版本文件缺失；拒绝报告更新成功"
   [[ "$(cat "$INSTALL_DIR/VERSION")" == "$tag" ]] || \
-    die "安装后版本不匹配：期望 $tag，实际 $(installed_version)"
+    die "安装后版本不匹配：期望 ${tag}，实际 $(installed_version)"
   [[ -s "$INSTALL_DIR/BUILD_COMMIT" ]] || die "安装后的构建提交标记缺失；拒绝报告更新成功"
-  cmp -s "$INSTALL_DIR/install.sh" "$release_dir/install.sh" || \
-    die "安装后的管理脚本不是本次发行包版本；拒绝报告更新成功"
+  bash -n "$INSTALL_DIR/install.sh" || die "安装后的管理脚本语法检查失败"
   write_environment "$host" "$port" "$path" "$user" "$password" "$secret"
   if [[ ! -s "$INSTALL_DIR/xray-config/config.json" ]]; then
     cat >"$INSTALL_DIR/xray-config/config.json" <<'JSON'
@@ -874,7 +879,7 @@ JSON
   wait_healthy
   svcb_enable || true
   install_shortcuts
-  ok "NodeLite 原生版安装/更新完成（$(installed_version) / $arch）"; show_access
+  ok "NodeLite 原生版安装/更新完成（$(installed_version) / ${arch}）"; show_access
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 

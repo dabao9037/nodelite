@@ -62,7 +62,7 @@ EOF
   existing="$(command -v node 2>/dev/null || true)"
   if [[ -z "$existing" || "$existing" == "$target" ]] || grep -q 'NodeLite management shortcut' "$target" 2>/dev/null; then
     cp "$alias" "$target"; chmod 0755 "$target"; ok "快捷命令已安装：node"
-  else warn "检测到已有 Node.js：$existing，未覆盖；请使用 nodelite"; fi
+  else warn "检测到已有 Node.js：${existing}，未覆盖；请使用 nodelite"; fi
 }
 
 write_environment() {
@@ -184,7 +184,7 @@ JSON
   fi
   install_units; install_shortcuts
   service_ctl restart nodelite-netguard.service nodelite-panel.service nodelite-xray.service nodelite-gateway.service
-  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / $arch）"; show_access
+  wait_healthy; ok "NodeLite 原生版安装/更新完成（$tag / ${arch}）"; show_access
   [[ -f "$old" ]] || printf '密码：%s\n' "$password"
 }
 

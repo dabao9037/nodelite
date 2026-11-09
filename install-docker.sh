@@ -337,7 +337,7 @@ svcb_repair_shared() {
 # 开启：幂等；任何一步失败都回滚，不把系统 DNS 弄坏
 svcb_enable() {
   if [ "$SVCB_BLOCK" != "1" ]; then
-    info "SVCB_BLOCK=$SVCB_BLOCK，跳过 SVCB/HTTPS 记录过滤"
+    info "SVCB_BLOCK=${SVCB_BLOCK}，跳过 SVCB/HTTPS 记录过滤"
     return 0
   fi
   if [ "$(id -u)" != "0" ]; then
@@ -601,7 +601,7 @@ EOF
     chmod 0755 "$target"
     ok "快捷命令已安装：node"
   else
-    warn "检测到已有 node 命令：$existing，未覆盖；可使用 nodelite 进入菜单"
+    warn "检测到已有 node 命令：${existing}，未覆盖；可使用 nodelite 进入菜单"
   fi
 }
 

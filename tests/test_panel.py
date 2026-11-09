@@ -215,6 +215,12 @@ def test_installer_never_creates_the_nodes_table(tmp_path, monkeypatch):
     assert not re.search(r"CREATE\s+TABLE(\s+IF\s+NOT\s+EXISTS)?\s+nodes", installer)
     assert "CREATE TABLE IF NOT EXISTS nodes" not in installer
 
+def test_installer_braces_variables_before_non_ascii_punctuation():
+    """Bash treats ``$var，`` as a variable named ``var，``; always brace it."""
+    installer = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    bad = re.findall(r"\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7f])", installer)
+    assert bad == []
+
 
 def test_repair_preserves_rows_of_a_broken_nodes_table(tmp_path, monkeypatch):
     """A corrupt table that somehow holds rows keeps them through the rebuild."""

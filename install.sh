@@ -607,7 +607,15 @@ save_installer() {
   if [[ -n "$source" && -f "$source" && -r "$source" ]]; then
     install -m 0755 "$source" "$destination"
   else
-    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$destination"
+    # raw.githubusercontent.com is Fastly-cached for 5 minutes.  Fetch through
+    # the API so a just-fixed installer is not silently replaced by a stale one.
+    if ! curl -fsSL --connect-timeout 15 --max-time 120 \
+      -H 'Accept: application/vnd.github.raw' \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "https://api.github.com/repos/$REPO/contents/install.sh?ref=main&nodelite=$(date +%s)-$RANDOM" \
+      -o "$destination"; then
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$destination"
+    fi
     chmod 0755 "$destination"
   fi
   bash -n "$destination" || die "保存的 NodeLite 管理脚本不完整"

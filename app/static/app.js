@@ -209,7 +209,7 @@ function localDateTime(epoch) {
 }
 
 const REALITY_PRESETS = new Set([
-  'www.atlasobscura.com', 'www.backblaze.com',
+  'www.debian.org', 'www.postgresql.org',
   'www.skao.int', 'www.sciencemuseum.org.uk',
   'www.4gamer.net', 'www.famitsu.com',
   'www.a-star.edu.sg', 'www.visitsingapore.com',

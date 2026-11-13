@@ -382,10 +382,10 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     login(client)
     home = client.get("/")
     assert home.status_code == 200
-    default_option = '<option value="www.atlasobscura.com">Atlas Obscura · 小众旅行（推荐）</option>'
+    default_option = '<option value="www.debian.org">Debian · 开源操作系统（推荐）</option>'
     assert default_option in home.text
     expected_groups = {
-        "美国": ("www.atlasobscura.com", "www.backblaze.com"),
+        "美国": ("www.debian.org", "www.postgresql.org"),
         "英国": ("www.skao.int", "www.sciencemuseum.org.uk"),
         "日本": ("www.4gamer.net", "www.famitsu.com"),
         "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
@@ -405,9 +405,9 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     ):
         assert f'value="{removed_host}"' not in home.text
     assert 'value="custom"' in home.text
-    assert '<input id="serverName" value="www.atlasobscura.com">' in home.text
-    assert '<input id="destination" value="www.atlasobscura.com:443">' in home.text
-    assert module.reality_values(None, None) == ("www.atlasobscura.com", "www.atlasobscura.com:443")
+    assert '<input id="serverName" value="www.debian.org">' in home.text
+    assert '<input id="destination" value="www.debian.org:443">' in home.text
+    assert module.reality_values(None, None) == ("www.debian.org", "www.debian.org:443")
     script = (Path(module.BASE_DIR) / "static/app.js").read_text()
     assert "updateRealityPreset" in script
     assert "`${value}:443`" in script

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "groups": [
-    {"label": "美国 · 文化探索 / 小众云企业", "targets": [{"name": "Atlas Obscura", "host": "www.atlasobscura.com"}, {"name": "Backblaze", "host": "www.backblaze.com"}]},
+    {"label": "美国 · 开源软件基础设施", "targets": [{"name": "Debian", "host": "www.debian.org"}, {"name": "PostgreSQL", "host": "www.postgresql.org"}]},
     {"label": "英国 · 科研设施 / 科学博物馆", "targets": [{"name": "SKAO", "host": "www.skao.int"}, {"name": "Science Museum", "host": "www.sciencemuseum.org.uk"}]},
     {"label": "日本 · 二次元 / 游戏媒体", "targets": [{"name": "4Gamer", "host": "www.4gamer.net"}, {"name": "Famitsu", "host": "www.famitsu.com"}]},
     {"label": "东南亚 · 科研机构 / 旅游资讯", "targets": [{"name": "A*STAR", "host": "www.a-star.edu.sg"}, {"name": "Visit Singapore", "host": "www.visitsingapore.com"}]},

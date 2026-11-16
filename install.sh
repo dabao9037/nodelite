@@ -89,6 +89,26 @@ svcb_active() {
   systemctl is-active --quiet "$SVCB_SVC" 2>/dev/null
 }
 
+# 兜底上游必须一行一个：dnsmasq 的 server= 只接受单个地址，
+# 把 "1.1.1.1 8.8.8.8" 整行塞进 server= 会让 dnsmasq 直接拒绝启动
+# （Name or service not known），表现为 53 端口无人监听、菜单报「53 端口未就绪」。
+svcb_default_upstreams() {
+  printf '%s\n' "${SVCB_UPSTREAM:-1.1.1.1 8.8.8.8}" \
+    | tr ' ,;\t' '\n\n\n\n' \
+    | sed '/^$/d'
+}
+
+# 写配置后先过一遍 dnsmasq --test：失败就把原文打出来，
+# 别让 systemctl enable --now 的「成功」掩盖掉 daemon 秒退。
+svcb_conf_test() {
+  local out
+  if ! out="$(dnsmasq --test --conf-file="$1" 2>&1)"; then
+    printf '%s\n' "$out" | sed 's/^/    /' >&2
+    return 1
+  fi
+  return 0
+}
+
 svcb_install_dnsmasq() {
   info "安装 dnsmasq（SVCB/HTTPS 过滤依赖 filter-rr）"
   if command -v apt-get >/dev/null 2>&1; then
@@ -216,8 +236,16 @@ RESOLV
 svcb_port_ready() {
   local _i out=""
   for _i in 1 2 3 4 5 6 7 8 9 10; do
-    out="$(ss -Hlun 2>/dev/null | awk '{print $4}' | grep -E '(^|:)53$' 2>/dev/null || true)"
+    if command -v ss >/dev/null 2>&1; then
+      # 必须确认占着 53 的是 dnsmasq 本身：systemd-resolved 的 stub
+      # (127.0.0.53:53) 也会匹配，否则会把「别人占着」误判成「已就绪」
+      out="$(ss -Hlunp 2>/dev/null | grep -F '"dnsmasq",pid' | awk '{print $4}' | grep -E '(^|:)53$' || true)"
+    else
+      # 精简系统（busybox）没有 ss，退回服务状态，别一律判失败
+      out="$(svcb_active && echo dnsmasq || true)"
+    fi
     [ -n "$out" ] && return 0
+    svcb_active || return 1    # daemon 已经退出，不必再空等满 10 秒
     sleep 1
   done
   return 1
@@ -294,7 +322,7 @@ svcb_repair_shared() {
   [ -f "$SVCB_SHARED_CONF" ] || return 0
   grep -qE '^[[:space:]]*no-resolv' "$SVCB_SHARED_CONF" 2>/dev/null && return 0
   local ups; ups="$(svcb_upstreams || true)"
-  [ -n "$ups" ] || ups="${SVCB_UPSTREAM:-1.1.1.1 8.8.8.8}"
+  [ -n "$ups" ] || ups="$(svcb_default_upstreams)"
   info "检测到旧版 shared DNS 配置缺上游（会导致整机解析失败），正在修复"
   {
     printf '# %s\n' "$SVCB_TAG"
@@ -346,7 +374,7 @@ svcb_enable() {
 
   local upstreams mode="dedicated"
   upstreams="$(svcb_upstreams || true)"
-  [ -n "$upstreams" ] || upstreams="${SVCB_UPSTREAM:-1.1.1.1 8.8.8.8}"
+  [ -n "$upstreams" ] || upstreams="$(svcb_default_upstreams)"
 
   # 已有 dnsmasq 在跑：注入配置，不另建实例、不动别人的 dnsmasq
   if systemctl is-active --quiet dnsmasq 2>/dev/null; then
@@ -386,6 +414,7 @@ svcb_enable() {
       systemctl disable --now dnsmasq >/dev/null 2>&1 || true
     fi
     svcb_write_conf "$upstreams" || { warn "写配置失败，跳过"; svcb_restore_resolv; return 0; }
+    svcb_conf_test "$SVCB_CONF" || { warn "配置未通过 dnsmasq --test（原文见上），回滚"; rm -f "$SVCB_CONF"; svcb_restore_resolv; return 0; }
     svcb_write_unit || { warn "写 service 失败，跳过"; rm -f "$SVCB_CONF"; svcb_restore_resolv; return 0; }
     if ! systemctl enable --now "$SVCB_SVC" >/dev/null 2>&1; then
       warn "过滤服务启动失败，回滚"
@@ -399,6 +428,7 @@ svcb_enable() {
 
   if ! svcb_port_ready; then
     warn "53 端口未就绪，回滚 DNS 配置"
+    journalctl -u "$SVCB_SVC" -n 10 --no-pager 2>/dev/null | sed 's/^/    /' || true
     svcb_disable >/dev/null 2>&1 || true
     return 0
   fi

@@ -31,7 +31,10 @@ ensure_tools() {
   for cmd in curl tar openssl; do command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd"); done
   ((${#missing[@]} == 0)) && return
   warn "仅安装缺失的基础工具：${missing[*]}"
-  if command -v apt-get >/dev/null; then apt-get update && apt-get install -y ca-certificates curl tar openssl
+  if command -v apt-get >/dev/null; then
+    # 死源（如已下架的 bullseye-backports）会让 update 退出 100；不能因此跳过安装
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar openssl
   elif command -v dnf >/dev/null; then dnf install -y ca-certificates curl tar openssl
   elif command -v yum >/dev/null; then yum install -y ca-certificates curl tar openssl
   else die "请先安装 curl、tar、openssl"; fi

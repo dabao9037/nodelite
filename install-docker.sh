@@ -18,6 +18,182 @@ ok() { printf '\033[0;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[0;33m[!]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[0;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ==================== apt 源容错（死源自动注释） ====================
+# 目标机上常见「死源」：发行版转入 LTS/EOL 后套件被下架（例如 bullseye-backports，
+# deb.debian.org 直接 404）、换过域名的镜像。apt-get update 只要有一个源拿不到
+# Release 就整体退出 100。旧实现写成 `apt-get update && apt-get install ...`，
+# update 一挂就短路，iptables 根本没装，最后报成「依赖安装后仍找不到命令：
+# iptables」——看着像缺包，其实是源坏了（2026-11-19 现场）。
+#
+# 处理顺序：
+#   1. update 失败 → 从输出里认出 404 的套件 → 注释对应源（留 .nodelite-bak）→ 重试
+#   2. 仍失败只 warn，用现有索引继续装；绝不因为 update 失败而跳过安装
+APT_SOURCES_LIST="${NODELITE_APT_SOURCES_LIST:-/etc/apt/sources.list}"
+APT_SOURCES_DIR="${NODELITE_APT_SOURCES_DIR:-/etc/apt/sources.list.d}"
+
+# 从 apt-get update 输出里取「源地址|套件名」，例如：
+#   E: The repository 'http://deb.debian.org/debian bullseye-backports Release'
+#      no longer has a Release file.
+apt_dead_suites() {
+  sed -n "s/^E: The repository '\(.*\)' \(no longer \|does not \)*ha\(s\|ve\) a Release file.*/\1/p" \
+    | awk 'NF >= 2 { print $1 "|" $(NF - 1) }' | sort -u
+}
+
+# 注释掉指定套件的源；uri 非空时要求同一行也含该地址，避免误伤同名的健康镜像。
+apt_disable_suite() {
+  local suite="$1" uri="${2:-}" file tmp changed=0
+  [[ -n "$suite" ]] || return 1
+
+  for file in "$APT_SOURCES_LIST" "$APT_SOURCES_DIR"/*.list; do
+    [[ -f "$file" ]] || continue
+    grep -qF -- "$suite" "$file" || continue
+    tmp="$(mktemp)"
+    awk -v suite="$suite" -v uri="$uri" '
+      function dead(line,   i, n, f, hit) {
+        if (line ~ /^[[:space:]]*#/) return 0
+        if (line !~ /^[[:space:]]*(deb|deb-src)[[:space:]]/) return 0
+        n = split(line, f, /[[:space:]]+/)
+        hit = 0
+        for (i = 1; i <= n; i++) if (f[i] == suite) hit = 1
+        if (!hit) return 0
+        if (uri != "" && index(line, uri) == 0) return 0
+        return 1
+      }
+      /^[[:space:]]*(deb|deb-src)[[:space:]]/ && dead($0) {
+        print "# nodelite: 套件 " suite " 已下架（Release 404）: " $0
+        next
+      }
+      { print }
+    ' "$file" >"$tmp"
+    if ! cmp -s "$file" "$tmp"; then
+      cp -p "$file" "$file.nodelite-bak" 2>/dev/null || true
+      cat "$tmp" >"$file"   # 保留 inode 与权限
+      changed=1
+    fi
+    rm -f "$tmp"
+  done
+
+  # deb822（Debian 12+ 的 .sources）：只摘掉 Suites: 里的死套件；
+  # 摘空说明这一段只剩死源，整段注掉，免得 apt 报「没有 Suites」。
+  for file in "$APT_SOURCES_DIR"/*.sources; do
+    [[ -f "$file" ]] || continue
+    grep -qF -- "$suite" "$file" || continue
+    tmp="$(mktemp)"
+    awk -v suite="$suite" '
+      BEGIN { start = 1 }
+      {
+        line[NR] = $0
+        if (pend) {
+          drop[NR] = 1
+          if ($0 ~ /^[[:space:]]*$/) pend = 0
+          next
+        }
+        if ($0 ~ /^[[:space:]]*$/) { start = NR + 1; next }
+        if ($0 ~ /^[[:space:]]*Suites:/ && index($0, suite)) {
+          head = $0
+          sub(/^[[:space:]]*Suites:[[:space:]]*/, "", head)
+          n = split(head, tok, /[[:space:]]+/)
+          kept = ""; hit = 0
+          for (i = 1; i <= n; i++) {
+            if (tok[i] == "") continue
+            if (tok[i] == suite) { hit = 1; continue }
+            kept = kept (kept == "" ? "" : " ") tok[i]
+          }
+          if (!hit) next
+          if (kept == "") {
+            for (i = start; i <= NR; i++) drop[i] = 1
+            pend = 1; dropped = 1
+          } else {
+            line[NR] = "Suites: " kept
+          }
+        }
+      }
+      END {
+        if (dropped) print "# nodelite: 仅含已下架套件 " suite "，整段停用"
+        for (i = 1; i <= NR; i++) print (drop[i] ? "# " line[i] : line[i])
+      }
+    ' "$file" >"$tmp"
+    if ! cmp -s "$file" "$tmp"; then
+      cp -p "$file" "$file.nodelite-bak" 2>/dev/null || true
+      cat "$tmp" >"$file"
+      changed=1
+    fi
+    rm -f "$tmp"
+  done
+  (( changed )) && return 0
+  return 1
+}
+
+# 容错的 apt-get update：失败时注释死源后重试，最多 3 轮；最终仍失败也只 warn。
+apt_update() {
+  local out attempt=0 dead uri suite fixed
+  out="$(mktemp)"
+  while (( attempt < 3 )); do
+    attempt=$((attempt + 1))
+    if DEBIAN_FRONTEND=noninteractive apt-get update >"$out" 2>&1; then
+      rm -f "$out"
+      return 0
+    fi
+    dead="$(apt_dead_suites <"$out")"
+    [[ -n "$dead" ]] || break
+    fixed=0
+    while IFS='|' read -r uri suite; do
+      [[ -n "$suite" ]] || continue
+      if apt_disable_suite "$suite" "$uri"; then
+        warn "apt 源「$uri $suite」已下架（Release 404），已注释并备份为 .nodelite-bak"
+        fixed=1
+      fi
+    done <<<"$dead"
+    (( fixed )) || break   # 注释不到就重试也没意义，直接留原文给用户看
+  done
+  warn "apt-get update 仍然失败，改用现有索引继续安装；若随后装包失败，请先修 /etc/apt/sources.list（输出如下）"
+  sed 's/^/    /' "$out" >&2
+  rm -f "$out"
+  return 0
+}
+
+# 取发行版代号，用于「security 索引坏掉时优先装 release 源版本」的兜底。
+apt_codename() {
+  [[ -r /etc/os-release ]] || return 0
+  awk -F= '/^VERSION_CODENAME=/ { gsub(/"/, "", $2); print $2; exit }' /etc/os-release
+}
+
+# apt 安装：先容错 update 再 install；失败把 apt 原文打出来，返回真实退出码。
+# 两级兜底：--fix-missing 跳过拿不到的包 → 再按发行版代号挑 release 源版本。
+apt_install() {
+  local out rc=0 codename
+  apt_update
+  out="$(mktemp)"
+  rc=0
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >"$out" 2>&1 || rc=$?
+  if (( rc != 0 )); then
+    # 单个包的 pool 404 会让整笔事务回滚，连能下的 iptables 都装不上。
+    # 典型场景：EOL 的 bullseye-security 索引已冻结、pool 已清空（Debian 11
+    # 已于 2026-08 结束 LTS），security 里的候选版本全是 404。此时优先装
+    # 发行版 release 源里的版本，再跳过拿不到的包。
+    warn "apt-get install $* 失败（退出码 $rc），改为优先装 release 源版本："
+    sed 's/^/    /' "$out" >&2
+    codename="$(apt_codename)"
+    rc=0
+    if [[ -n "$codename" ]]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing -t "$codename" "$@" >>"$out" 2>&1 || rc=$?
+    else
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing "$@" >>"$out" 2>&1 || rc=$?
+    fi
+  fi
+  if (( rc != 0 )); then
+    warn "仍然失败，再试一次 --fix-missing 跳过拿不到的包"
+    rc=0
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing "$@" >>"$out" 2>&1 || rc=$?
+  fi
+  if (( rc != 0 )); then
+    warn "apt-get install $* 仍然失败（退出码 $rc），输出见上"
+  fi
+  rm -f "$out"
+  return "$rc"
+}
+# ==================== apt 源容错 · 结束 ====================
+
 random_password() { openssl rand -base64 24 | tr -d '\n=/+' | cut -c1-20; }
 random_secret() { openssl rand -hex 32; }
 random_path() { printf 'panel-%s' "$(openssl rand -hex 8)"; }
@@ -468,9 +644,7 @@ svcb_enable() {
 
 install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y ca-certificates curl git openssl iproute2
+    apt_install ca-certificates curl git openssl iproute2 || true
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y ca-certificates curl git openssl iproute
   elif command -v yum >/dev/null 2>&1; then
@@ -478,6 +652,10 @@ install_packages() {
   else
     die "仅支持 apt、dnf 或 yum 系统"
   fi
+  for cmd in curl git openssl ip; do
+    command -v "$cmd" >/dev/null 2>&1 \
+      || die "依赖安装后仍找不到命令：$cmd（apt 输出见上；若源已损坏，请先修 /etc/apt/sources.list 再重试）"
+  done
 }
 
 install_docker() {
@@ -496,7 +674,7 @@ ensure_network_tools() {
   command -v sysctl >/dev/null 2>&1 && return
   warn "安装网络设置所需工具：sysctl"
   if command -v apt-get >/dev/null; then
-    apt-get update && apt-get install -y procps kmod
+    apt_install procps kmod || true
   elif command -v dnf >/dev/null; then
     dnf install -y procps-ng kmod
   elif command -v yum >/dev/null; then

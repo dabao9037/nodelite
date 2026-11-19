@@ -6,7 +6,7 @@ trap 'rm -rf "$TMP"' EXIT
 sed -n '/^ensure_git() {/,/^}/p' "$ROOT/install.sh" >"$TMP/function.sh"
 
 grep -Fq 'command -v git >/dev/null 2>&1 && return 0' "$TMP/function.sh"
-grep -Fq 'apt-get update && apt-get install -y ca-certificates git' "$TMP/function.sh"
+grep -Fq 'apt_install ca-certificates git' "$TMP/function.sh"
 grep -Fq 'dnf install -y ca-certificates git' "$TMP/function.sh"
 grep -Fq 'yum install -y ca-certificates git' "$TMP/function.sh"
 grep -Fq 'apk add --no-cache ca-certificates git' "$TMP/function.sh"

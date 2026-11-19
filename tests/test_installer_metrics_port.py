@@ -68,3 +68,5 @@ def test_install_writes_metrics_port_and_verifies_xray():
     text = INSTALLER.read_text(encoding="utf-8")
     assert "XRAY_METRICS_PORT=$(pick_metrics_port" in text
     assert 'service_prop nodelite-xray.service ActiveState' in text
+    assert "attempt == 5" in text  # 面板重写配置后允许 xray 重启一次
+    assert "20 秒内始终没起来" in text

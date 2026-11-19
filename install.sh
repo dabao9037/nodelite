@@ -1209,8 +1209,18 @@ JSON
   svcb_enable || true
   install_shortcuts
   ok "NodeLite 原生版安装/更新完成（$(installed_version) / ${arch}）"; show_access
-  if [[ "$(service_prop nodelite-xray.service ActiveState)" != active ]]; then
-    warn "nodelite-xray 未能进入 active（面板与网关已起，节点暂不可用）"
+  # 面板启动后才会把最新配置写进 xray-config；xray 可能先用旧配置起一次再被
+  # 系统重启，所以这里等它稳定（最多 20 秒），中途补一次 restart。
+  local xray_ok=0 attempt
+  for attempt in $(seq 1 20); do
+    if [[ "$(service_prop nodelite-xray.service ActiveState)" == active ]]; then
+      xray_ok=1; break
+    fi
+    if (( attempt == 5 )); then service_ctl restart nodelite-xray.service >/dev/null 2>&1 || true; fi
+    sleep 1
+  done
+  if (( ! xray_ok )); then
+    warn "nodelite-xray 20 秒内始终没起来（面板与网关已起，节点暂不可用）"
     journalctl -u nodelite-xray.service -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || true
     die "Xray 启动失败；修好后再执行 nodelite restart（常见原因：端口被占用、配置错误）"
   fi

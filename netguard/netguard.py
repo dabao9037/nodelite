@@ -302,9 +302,18 @@ def nft_json_supported() -> bool:
     if _NFT_JSON_SUPPORTED is None:
         result = subprocess.run(
             ["nft", "-j", "list", "tables"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        _NFT_JSON_SUPPORTED = result.returncode == 0
+        if result.returncode == 0:
+            _NFT_JSON_SUPPORTED = True
+        else:
+            # 只有「不认识 -j」才算版本太老；权限/内核问题要原样报错，
+            # 不能悄悄降级成文本模式把真实故障吞掉。
+            message = ((result.stderr or "") + (result.stdout or "")).lower()
+            _NFT_JSON_SUPPORTED = not any(
+                marker in message
+                for marker in ("invalid option", "unknown option", "unrecognized option")
+            )
     return _NFT_JSON_SUPPORTED
 
 

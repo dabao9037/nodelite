@@ -117,9 +117,24 @@ cp -a "$ROOT/app" "$ROOT/gateway" "$ROOT/netguard" "$PKG/source/"
 find "$PKG/source" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$PKG/source" -type f -name '*.pyc' -delete
 
+# standalone Python 的 libpython 带调试符号（单份 119MB，三个服务各一份）。
+# 不 strip 的话压缩包会从 ~65MB 涨到 ~140MB。
+strip_payload() {
+  local file
+  while IFS= read -r -d '' file; do
+    readelf -h "$file" >/dev/null 2>&1 || continue
+    strip --strip-unneeded "$file" 2>/dev/null || true
+  done < <(find "$PKG/lib" -type f -print0)
+}
+strip_payload
+
 printf '%s\n' "$XRAY_VERSION" > "$PKG/XRAY_VERSION"
 printf '%s\n' "$ARCH" > "$PKG/ARCH"
-printf '%s\n' "${NODELITE_GLIBC_MAX:-2.31}" > "$PKG/GLIBC_MAX"
+# 实测包里真正需要的最低 GLIBC，别再把拍脑袋的 2.31 写进去：
+# 实测值是多少，安装器就放行到哪个版本（Debian 10 是 2.28、CentOS 7 是 2.17）。
+MEASURED_GLIBC="$("$PYTHON" "$ROOT/scripts/glibc-required.py" "$PKG")"
+printf '%s\n' "$MEASURED_GLIBC" > "$PKG/GLIBC_MAX"
+echo "measured GLIBC_MAX=$MEASURED_GLIBC"
 printf '%s\n' "${NODELITE_RELEASE_TAG:-${GITHUB_REF_NAME:-dev}}" > "$PKG/VERSION"
 printf '%s\n' "${GITHUB_SHA:-local}" > "$PKG/BUILD_COMMIT"
 
@@ -140,7 +155,8 @@ test -x "$PKG/install.sh"
 test -s "$PKG/VERSION"
 test -s "$PKG/BUILD_COMMIT"
 for unit in panel gateway xray netguard; do test -s "$PKG/systemd/nodelite-$unit.service"; done
-"$ROOT/scripts/verify-glibc-compat.sh" "$PKG" "${NODELITE_GLIBC_MAX:-2.31}"
+"$ROOT/scripts/verify-glibc-compat.sh" "$PKG" "${NODELITE_GLIBC_MAX:-2.17}"
+[[ "$(cat "$PKG/GLIBC_MAX")" != "0.0" ]] || { echo "GLIBC_MAX 测量失败" >&2; exit 69; }
 
 rm -f "$OUT" "$OUT.sha256"
 tar -C "$PKG" -czf "$OUT" .

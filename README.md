@@ -142,7 +142,7 @@ GET  /api/nodes/{id}/sub/qr
 bash scripts/build-native-release-container.sh amd64
 ```
 
-构建脚本在 Debian 11 / GLIBC 2.31 容器中创建隔离 venv，安装 `requirements-native.txt` 和 PyInstaller，生成 three one-dir 应用，然后下载并嵌入 Xray 26.6.27。发布门禁会扫描包内全部 ELF，拒绝高于 GLIBC 2.31 的依赖；目标服务器无需 Python、pip 或编译器。
+构建脚本在 manylinux2014（GLIBC 2.17）容器中创建隔离 venv，安装 `requirements-native.txt` 和 PyInstaller，生成 three one-dir 应用，然后下载并嵌入 Xray 26.6.27。容器内用 python-build-standalone 的共享库版 Python（同样 2.17 基线），因为 manylinux2014 自带的 Python 是静态编译、PyInstaller 用不了。打包前会 strip 调试符号，并**实测**包内 ELF 所需的最低 GLIBC 写进 `GLIBC_MAX`（当前 2.17），安装器据此判断；目标服务器无需 Python、pip 或编译器。
 
 ## Reality 伪装目标
 

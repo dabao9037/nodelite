@@ -54,7 +54,8 @@ service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"
 # 过滤掉这两种 RR 后，客户端按 RFC 9460/9461 自动回退到 A/AAAA + h2，业务功能不受
 # 影响；代价只是失去 HTTP/3 与 ECH。
 #
-# 依赖 dnsmasq >= 2.86（filter-rr 在 2.86 引入）。版本不够时跳过而不是把系统 DNS
+# 依赖 dnsmasq >= 2.86（filter-rr 在 2.86 引入）。系统包太旧（Debian 11 是 2.85、
+# CentOS 7 是 2.76）时改用 release 包自带的静态 2.90；两者都没有才跳过，而不是把系统 DNS
 # 改坏。关闭方式：SVCB_BLOCK=0，或执行 dns-unblock 子命令。
 # ==========================================================================
 SVCB_BLOCK="${SVCB_BLOCK:-1}"
@@ -68,18 +69,62 @@ SVCB_RESOLVED_DROPIN="${SVCB_RESOLVED_DROPIN:-$SVCB_ETC/systemd/resolved.conf.d/
 SVCB_NM_DROPIN="${SVCB_NM_DROPIN:-$SVCB_ETC/NetworkManager/conf.d/90-svcb-block.conf}"
 SVCB_SHARED_CONF="${SVCB_SHARED_CONF:-$SVCB_ETC/dnsmasq.d/svcb-block.conf}"
 SVCB_LISTEN="${SVCB_LISTEN:-127.0.0.1}"
+# 系统 dnsmasq 低于这个版本就没有 filter-rr，改用 release 包内置的静态 2.90
+SVCB_DNSMASQ_MIN="${SVCB_DNSMASQ_MIN:-2.86}"
+SVCB_DNSMASQ_BUNDLED="${SVCB_DNSMASQ_BUNDLED:-$INSTALL_DIR/bin/dnsmasq}"
 SVCB_TAG="svcb-dns-filter"
 SVCB_SVC="$SVCB_TAG.service"
 
+# ==================== dnsmasq 版本与二进制选择 ====================
+# filter-rr 是 dnsmasq 2.86 才有的；Debian 11 只有 2.85，CentOS 7 是 2.76，
+# CentOS Stream 8 是 2.79 —— 这些发行版永远等不到支持 filter-rr 的更新。
+# release 包自带静态 2.90，系统版本不够就切到它；够用则不碰系统包。
+svcb_bin_version() {
+  local bin="${1:-}" out
+  [[ -n "$bin" && -x "$bin" ]] || return 0
+  out="$("$bin" --version 2>/dev/null | sed -n '1s/.*[Vv]ersion[[:space:]]*\([0-9][0-9.]*\).*/\1/p')"
+  printf '%s' "$out"
+}
+
+svcb_ver_ge() {
+  local v="${1:-}" min="${2:-$SVCB_DNSMASQ_MIN}"
+  [[ -n "$v" ]] || return 1
+  [ "$(printf '%s\n%s\n' "$min" "$v" | sort -V 2>/dev/null | sed -n '1p')" = "$min" ]
+}
+
+# 系统自带的 dnsmasq（PATH 里的那个）够不够新
+svcb_system_dnsmasq_ok() {
+  local bin; bin="$(command -v dnsmasq 2>/dev/null || true)"
+  [[ -n "$bin" ]] || return 1
+  svcb_ver_ge "$(svcb_bin_version "$bin")"
+}
+
+# 实际要用的 dnsmasq：内置的够新就优先内置，否则用系统的
+svcb_dnsmasq_bin() {
+  local sys; sys="$(command -v dnsmasq 2>/dev/null || true)"
+  # 系统包够新就用系统的：跟着发行版吃安全更新，也不抢用户的包管理
+  if [[ -n "$sys" ]] && svcb_ver_ge "$(svcb_bin_version "$sys")"; then
+    printf '%s' "$sys"
+    return 0
+  fi
+  # 系统太旧（bullseye 2.85 / CentOS 7 2.76）才用内置的静态 2.90
+  if [[ -x "$SVCB_DNSMASQ_BUNDLED" ]] && svcb_ver_ge "$(svcb_bin_version "$SVCB_DNSMASQ_BUNDLED")"; then
+    printf '%s' "$SVCB_DNSMASQ_BUNDLED"
+    return 0
+  fi
+  # 两个都不够新：返回系统的，让调用方按版本不足去提示
+  [[ -n "$sys" ]] && printf '%s' "$sys"
+  return 0
+}
+
 svcb_version() {
-  dnsmasq --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p'
+  svcb_bin_version "$(svcb_dnsmasq_bin || true)"
 }
 
 svcb_version_ok() {
-  local v; v="$(svcb_version || true)"
-  [ -n "$v" ] || return 1
-  [ "$(printf '%s\n2.86\n' "$v" | sort -V 2>/dev/null | sed -n '1p')" = "2.86" ]
+  svcb_ver_ge "$(svcb_version || true)"
 }
+# ==================== dnsmasq 版本与二进制选择 · 结束 ====================
 
 svcb_is_on() {
   [ -f "$SVCB_CONF" ] || [ -f "$SVCB_SHARED_CONF" ]
@@ -101,8 +146,10 @@ svcb_default_upstreams() {
 # 写配置后先过一遍 dnsmasq --test：失败就把原文打出来，
 # 别让 systemctl enable --now 的「成功」掩盖掉 daemon 秒退。
 svcb_conf_test() {
-  local out
-  if ! out="$(dnsmasq --test --conf-file="$1" 2>&1)"; then
+  local bin out
+  bin="$(svcb_dnsmasq_bin || true)"
+  [[ -n "$bin" ]] || return 1
+  if ! out="$("$bin" --test --conf-file="$1" 2>&1)"; then
     printf '%s\n' "$out" | sed 's/^/    /' >&2
     return 1
   fi
@@ -112,14 +159,17 @@ svcb_conf_test() {
 svcb_install_dnsmasq() {
   info "安装 dnsmasq（SVCB/HTTPS 过滤依赖 filter-rr）"
   if command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsmasq >/dev/null 2>&1 || return 1
+    apt_install dnsmasq || true
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q dnsmasq >/dev/null 2>&1 || return 1
+    dnf install -y dnsmasq || true
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y -q dnsmasq >/dev/null 2>&1 || return 1
+    yum install -y dnsmasq || true
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache dnsmasq >/dev/null 2>&1 || return 1
+    apk add --no-cache dnsmasq || true
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install dnsmasq || true
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm dnsmasq || true
   else
     return 1
   fi
@@ -202,8 +252,13 @@ svcb_write_conf() {
 }
 
 svcb_write_unit() {
-  local bin; bin="$(command -v dnsmasq || true)"
+  local bin; bin="$(svcb_dnsmasq_bin || true)"
   [ -n "$bin" ] || return 1
+  # CentOS/RHEL 若开着 SELinux，/opt 下的可执行文件默认标签可能被拦；
+  # 打上 bin_t 让 systemd 能直接跑（失败不致命，unconfined 服务本来也能跑）。
+  if [ "$bin" = "$SVCB_DNSMASQ_BUNDLED" ] && command -v chcon >/dev/null 2>&1; then
+    chcon -t bin_t "$bin" >/dev/null 2>&1 || true
+  fi
   mkdir -p "$(dirname "$SVCB_UNIT")" 2>/dev/null || true
   cat > "$SVCB_UNIT" <<UNIT
 [Unit]
@@ -274,9 +329,10 @@ svcb_verify() {
 }
 
 svcb_status() {
-  local v; v="$(svcb_version || true)"
+  local v bin; v="$(svcb_version || true)"; bin="$(svcb_dnsmasq_bin || true)"
   info "DNS 过滤状态"
   printf '  dnsmasq 版本 : %s\n' "${v:-未安装}"
+  printf '  dnsmasq 路径 : %s\n' "${bin:-未安装}"
   printf '  模式文件     : %s\n' "$([ -f "$SVCB_MODE_FILE" ] && cat "$SVCB_MODE_FILE" || echo 未启用)"
   if svcb_active; then
     printf '  独立服务     : %s（运行中）\n' "$SVCB_SVC"
@@ -363,12 +419,18 @@ svcb_enable() {
     return 0
   fi
 
-  command -v dnsmasq >/dev/null 2>&1 || svcb_install_dnsmasq || {
-    warn "dnsmasq 安装失败，跳过 SVCB/HTTPS 过滤（不影响其他功能）"
+  # 优先用 release 包内置的静态 dnsmasq（老发行版的系统包没有 filter-rr），
+  # 没有内置的才去装系统包；两条路都失败才跳过。
+  if [[ -z "$(svcb_dnsmasq_bin || true)" ]]; then
+    svcb_install_dnsmasq || true
+  fi
+  if [[ -z "$(svcb_dnsmasq_bin || true)" ]]; then
+    warn "dnsmasq 安装失败（apt/dnf 输出见上），跳过 SVCB/HTTPS 过滤（不影响其他功能）"
     return 0
-  }
+  fi
   if ! svcb_version_ok; then
-    warn "dnsmasq $(svcb_version || echo 未知) 低于 2.86，无 filter-rr，跳过过滤"
+    warn "dnsmasq $(svcb_version || echo 未知) 低于 ${SVCB_DNSMASQ_MIN}，无 filter-rr，跳过过滤"
+    warn "release 包里没有可用的内置 dnsmasq：$SVCB_DNSMASQ_BUNDLED（重装或重新下载发行包可恢复）"
     return 0
   fi
 
@@ -376,8 +438,9 @@ svcb_enable() {
   upstreams="$(svcb_upstreams || true)"
   [ -n "$upstreams" ] || upstreams="$(svcb_default_upstreams)"
 
-  # 已有 dnsmasq 在跑：注入配置，不另建实例、不动别人的 dnsmasq
-  if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+  # 已有 dnsmasq 在跑且系统版本够新：注入配置，不另建实例；
+  # 系统版本太旧（如 bullseye 2.85）时注入会把它的服务搞挂，改走独立实例。
+  if systemctl is-active --quiet dnsmasq 2>/dev/null && svcb_system_dnsmasq_ok; then
     mode="shared"
   fi
 

@@ -90,6 +90,18 @@ PY
 chmod 0755 "$PKG/bin/xray"
 chmod 0644 "$PKG/bin/geoip.dat" "$PKG/bin/geosite.dat"
 
+# 内置 dnsmasq：SVCB/HTTPS 过滤要 filter-rr（2.86+），Debian 11（2.85）、
+# CentOS 7（2.76）、CentOS Stream 8（2.79）的系统包都没有。静态 musl 二进制，
+# 安装器在系统版本不够时改用它，不覆盖发行版的 /usr/sbin/dnsmasq。
+DNSMASQ_BIN="${NODELITE_DNSMASQ_BIN:-$ROOT/build-artifacts/dnsmasq-$ARCH}"
+if [[ ! -x "$DNSMASQ_BIN" ]]; then
+  echo "缺少静态 dnsmasq：$DNSMASQ_BIN（先跑 scripts/build-dnsmasq-static.sh $ARCH）" >&2
+  exit 68
+fi
+install -m 0755 "$DNSMASQ_BIN" "$PKG/bin/dnsmasq"
+"$PKG/bin/dnsmasq" --version | head -n1 | grep -q '2\.90' \
+  || { echo "内置 dnsmasq 版本不对：$("$PKG/bin/dnsmasq" --version | head -n1)" >&2; exit 68; }
+
 cp "$ROOT"/packaging/systemd/*.service "$PKG/systemd/"
 cp "$ROOT/install.sh" "$PKG/install.sh"
 cp "$ROOT/install-docker.sh" "$PKG/install-docker.sh"
@@ -123,6 +135,7 @@ test -x "$PKG/bin/nodelite-panel"
 test -x "$PKG/bin/nodelite-gateway"
 test -x "$PKG/bin/nodelite-netguard"
 test -x "$PKG/bin/xray"
+test -x "$PKG/bin/dnsmasq"
 test -x "$PKG/install.sh"
 test -s "$PKG/VERSION"
 test -s "$PKG/BUILD_COMMIT"

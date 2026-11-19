@@ -33,3 +33,4 @@ toolprobe.txt
 
 # Build outputs
 dist/
+build-artifacts/

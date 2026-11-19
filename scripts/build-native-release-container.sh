@@ -32,8 +32,12 @@ if [[ -z "$RELEASE_TAG" ]]; then
   exit 65
 fi
 
+# 内置静态 dnsmasq：老发行版（Debian 11 / CentOS 7/8）的系统包没有 filter-rr。
+bash "$ROOT/scripts/build-dnsmasq-static.sh" "$ARCH" "$ROOT/build-artifacts/dnsmasq-$ARCH"
+
 docker run --rm --platform "$PLATFORM" \
   -e DEBIAN_FRONTEND=noninteractive \
+  -e NODELITE_DNSMASQ_BIN="/src/build-artifacts/dnsmasq-$ARCH" \
   -e GITHUB_SHA="${GITHUB_SHA:-local}" \
   -e NODELITE_RELEASE_TAG="$RELEASE_TAG" \
   -e GITHUB_REF_NAME="$RELEASE_TAG" \

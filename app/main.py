@@ -98,6 +98,15 @@ XRAY_API_ADDRESS = "127.0.0.1:10085"
 XRAY_METRICS_ADDRESS = "127.0.0.1:11111"
 MIB = 1024 * 1024
 MAX_TRAFFIC_LIMIT_MB = 1_000_000_000
+# 会话：cookie 里只放随机 token，库里存 sha256；改密码时 cred_epoch 变化，
+# 所有旧会话立即失效（旧实现的 cookie 是 HMAC(密码)，等于永久令牌）。
+SESSION_COOKIE = "node_panel_session"
+SESSION_TTL_SECONDS = 7 * 24 * 3600
+SESSION_TOUCH_SECONDS = 60
+SESSION_MAX_PER_USER = 20
+# 登录失败限速：每 IP 10 次失败 / 10 分钟。成功登录清零。
+LOGIN_RATE_LIMIT = (10, 600.0)
+LOGIN_RATE_MAX_KEYS = 10000
 
 if not ADMIN_CREDENTIAL or not SIGNING_SECRET:
     raise RuntimeError("Administrator credential and application signing secret are required")
@@ -111,6 +120,9 @@ TELEMETRY_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
 WORKER: threading.Thread | None = None
 RATE_STATE: dict[int, tuple[int, int, float]] = {}
+LOGIN_RATE: dict[str, list] = {}
+LOGIN_RATE_LOCK = threading.Lock()
+SESSION_PURGED_AT = 0.0
 TELEMETRY: dict[int, dict] = {}
 RUNTIME_DIRTY = False
 LAST_SERVICE_STATUSES = {
@@ -414,6 +426,15 @@ def init_db():
           applied_at INTEGER NOT NULL
         )
         """)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS sessions (
+              token_hash TEXT PRIMARY KEY,
+              created_at INTEGER NOT NULL,
+              last_seen INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              cred_epoch TEXT NOT NULL
+            )"""
+        )
         migrations = [
             (version, column, f"ALTER TABLE nodes ADD COLUMN {definition}")
             for version, column, definition in NODE_MIGRATIONS
@@ -485,14 +506,100 @@ def init_db():
         conn.commit()
 
 
-def auth_token():
-    raw = f"{ADMIN_USER}\0{ADMIN_CREDENTIAL}".encode()
-    return hmac.new(SIGNING_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+def cred_epoch() -> str:
+    """密码/用户名一变就变，用来一次性吊销所有会话。"""
+    raw = f"epoch\0{ADMIN_USER}\0{ADMIN_CREDENTIAL}".encode()
+    return hmac.new(SIGNING_SECRET.encode(), raw, hashlib.sha256).hexdigest()[:32]
+
+
+def _session_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_session() -> str:
+    token = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with STATE_LOCK, closing(connect_db()) as conn:
+        conn.execute(
+            "INSERT INTO sessions(token_hash, created_at, last_seen, expires_at, cred_epoch) "
+            "VALUES(?,?,?,?,?)",
+            (_session_hash(token), now, now, now + SESSION_TTL_SECONDS, cred_epoch()),
+        )
+        # 只保留最近的 N 个会话，避免表无限增长
+        conn.execute(
+            "DELETE FROM sessions WHERE token_hash NOT IN ("
+            " SELECT token_hash FROM sessions ORDER BY last_seen DESC LIMIT ?)",
+            (SESSION_MAX_PER_USER,),
+        )
+        conn.commit()
+    return token
+
+
+def session_valid(token: str | None, *, touch: bool = True) -> bool:
+    if not token or len(token) > 200:
+        return False
+    digest = _session_hash(token)
+    now = int(time.time())
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            "SELECT expires_at, cred_epoch, last_seen FROM sessions WHERE token_hash=?",
+            (digest,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["expires_at"] <= now or not secrets.compare_digest(str(row["cred_epoch"]), cred_epoch()):
+            conn.execute("DELETE FROM sessions WHERE token_hash=?", (digest,))
+            conn.commit()
+            return False
+        if touch and now - int(row["last_seen"]) >= SESSION_TOUCH_SECONDS:
+            conn.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", (now, digest))
+            conn.commit()
+    return True
+
+
+def drop_session(token: str | None) -> None:
+    if not token:
+        return
+    with STATE_LOCK, closing(connect_db()) as conn:
+        conn.execute("DELETE FROM sessions WHERE token_hash=?", (_session_hash(token),))
+        conn.commit()
+
+
+def purge_sessions(now: int | None = None) -> int:
+    global SESSION_PURGED_AT
+    moment = time.time()
+    if now is None and moment - SESSION_PURGED_AT < 600:
+        return 0
+    SESSION_PURGED_AT = moment
+    stamp = int(now if now is not None else moment)
+    with STATE_LOCK, closing(connect_db()) as conn:
+        cursor = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (stamp,))
+        conn.commit()
+        return cursor.rowcount
+
+
+def login_blocked(ip: str, now: float) -> bool:
+    entry = LOGIN_RATE.get(ip)
+    limit, window = LOGIN_RATE_LIMIT
+    return bool(entry and now - entry[0] < window and entry[1] >= limit)
+
+
+def login_failed(ip: str, now: float) -> None:
+    limit, window = LOGIN_RATE_LIMIT
+    entry = LOGIN_RATE.get(ip)
+    if entry is None or now - entry[0] >= window:
+        if len(LOGIN_RATE) >= LOGIN_RATE_MAX_KEYS:
+            for stale in [key for key, value in LOGIN_RATE.items() if now - value[0] >= window]:
+                LOGIN_RATE.pop(stale, None)
+            if len(LOGIN_RATE) >= LOGIN_RATE_MAX_KEYS:
+                LOGIN_RATE.clear()
+        LOGIN_RATE[ip] = [now, 1]
+    else:
+        entry[1] += 1
 
 
 def require_admin(request: Request):
-    value = request.cookies.get("node_panel_session", "")
-    if value and secrets.compare_digest(value, auth_token()):
+    if session_valid(request.cookies.get(SESSION_COOKIE)):
         return ADMIN_USER
     raise HTTPException(401, "请先登录")
 
@@ -902,7 +1009,8 @@ def write_config(rows=None):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temp, 0o644)
+        # 里面有所有节点的私钥/UUID/SS 密码，只给 root 读
+        os.chmod(temp, 0o600)
         temp.replace(XRAY_CONFIG_PATH)
     except BaseException:
         temp.unlink(missing_ok=True)
@@ -1168,6 +1276,7 @@ def expire_due_nodes(now: int | None = None, apply_runtime: bool = True):
 
 def background_tick():
     global RUNTIME_DIRTY
+    purge_sessions()
     expire_due_nodes(apply_runtime=False)
     sample = sample_telemetry()
     disable_exceeded_nodes(getattr(sample, "exceeded_ids", []))
@@ -1402,28 +1511,44 @@ def readyz():
 
 @app.get("/login", response_class=HTMLResponse, response_model=None)
 def login_page(request: Request) -> Response:
-    if request.cookies.get("node_panel_session") == auth_token():
+    if session_valid(request.cookies.get(SESSION_COOKIE), touch=False):
         return RedirectResponse("./", 303)
     return no_store(HTMLResponse(render_login()))
 
 
 @app.post("/login", response_class=HTMLResponse, response_model=None)
 def login(request: Request, username: str = Form(...), password: str = Form(...)) -> Response:
+    ip = _client_ip(request)
+    now = time.time()
+    with LOGIN_RATE_LOCK:
+        if login_blocked(ip, now):
+            limited = Response(
+                render_login("尝试过于频繁，请 10 分钟后再试。"),
+                status_code=429, media_type="text/html",
+                headers={"Retry-After": str(int(LOGIN_RATE_LIMIT[1]))},
+            )
+            return no_store(limited)
     if not (secrets.compare_digest(username, ADMIN_USER) and secrets.compare_digest(password, ADMIN_CREDENTIAL)):
+        time.sleep(0.2)  # 失败固定延时，拖慢爆破/枚举
+        with LOGIN_RATE_LOCK:
+            login_failed(ip, time.time())
         return no_store(HTMLResponse(render_login("用户名或密码错误，请重新输入。"), 401))
+    with LOGIN_RATE_LOCK:
+        LOGIN_RATE.pop(ip, None)
     response = RedirectResponse("./", 303)
     response.set_cookie(
-        "node_panel_session", auth_token(), httponly=True,
-        secure=request.url.scheme == "https", samesite="lax", max_age=604800,
-        path=request_cookie_path(request),
+        SESSION_COOKIE, create_session(), httponly=True,
+        secure=request.url.scheme == "https", samesite="lax",
+        max_age=SESSION_TTL_SECONDS, path=request_cookie_path(request),
     )
     return no_store(response)
 
 
 @app.post("/logout")
 def logout(request: Request):
+    drop_session(request.cookies.get(SESSION_COOKIE))
     response = RedirectResponse("login", 303)
-    response.delete_cookie("node_panel_session", path=request_cookie_path(request))
+    response.delete_cookie(SESSION_COOKIE, path=request_cookie_path(request))
     return no_store(response)
 
 

@@ -2081,3 +2081,68 @@ def test_netguard_rebuilds_instead_of_crashing_after_node_deleted(tmp_path, monk
         {"id": 1, "port": 30001, "limit": 2, "max_devices": 2, "active_devices": 0},
     ]
     assert len(applied) == 1 and "devices_2_" not in applied[0] and "30002" not in applied[0]
+
+
+def test_logout_revokes_session_server_side(panel):
+    _, client = panel
+    assert login(client).status_code == 303
+    token = client.cookies.get("node_panel_session")
+    assert token and client.get("/api/nodes").status_code == 200
+    client.post("/logout")
+    client.cookies.set("node_panel_session", token)
+    assert client.get("/api/nodes").status_code == 401
+
+
+def test_expired_and_stale_epoch_sessions_are_rejected(panel):
+    module, client = panel
+    now = int(module.time.time())
+    login(client)
+    token = client.cookies.get("node_panel_session")
+    digest = module._session_hash(token)
+
+    with module.connect_db() as conn:
+        conn.execute("UPDATE sessions SET expires_at=? WHERE token_hash=?", (now - 1, digest))
+        conn.commit()
+    assert client.get("/api/nodes").status_code == 401
+
+    login(client)
+    token = client.cookies.get("node_panel_session")
+    with module.connect_db() as conn:
+        conn.execute("UPDATE sessions SET cred_epoch='stale' WHERE token_hash=?", (module._session_hash(token),))
+        conn.commit()
+    assert client.get("/api/nodes").status_code == 401
+
+
+def test_password_change_invalidates_existing_sessions(panel):
+    module, client = panel
+    login(client)
+    assert client.get("/api/nodes").status_code == 200
+    module.ADMIN_CREDENTIAL = "rotated-password"
+    assert client.get("/api/nodes").status_code == 401
+
+
+def test_login_rate_limit_blocks_and_recovers(panel, monkeypatch):
+    module, client = panel
+    for index in range(module.LOGIN_RATE_LIMIT[0]):
+        response = client.post(
+            "/login", data={"username": "test-admin", "password": f"wrong-{index}"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 401
+    blocked = client.post(
+        "/login", data={"username": "test-admin", "password": "correct-horse"},
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == str(int(module.LOGIN_RATE_LIMIT[1]))
+    assert "尝试过于频繁" in blocked.text
+
+    with module.LOGIN_RATE_LOCK:
+        module.LOGIN_RATE.clear()
+    assert login(client).status_code == 303
+
+
+def test_xray_config_is_owner_only(panel):
+    module, _ = panel
+    module.write_config()
+    assert (module.XRAY_CONFIG_PATH.stat().st_mode & 0o777) == 0o600

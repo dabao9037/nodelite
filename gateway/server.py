@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import os
 import re
+import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ACCESS_PATH = os.environ.get("ACCESS_PATH", "").strip("/")
@@ -15,11 +16,32 @@ UPSTREAM_HOST = os.environ.get("UPSTREAM_HOST", "panel")
 UPSTREAM_PORT = int(os.environ.get("UPSTREAM_PORT", "8080"))
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8080"))
+TLS_CERT = os.environ.get("TLS_CERT", "").strip()
+TLS_KEY = os.environ.get("TLS_KEY", "").strip()
+TLS_ACTIVE = False
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
+
+
+def build_tls_context() -> ssl.SSLContext | None:
+    """TLS 是纯开关：两个都配才启用，只配一个直接拒绝启动，绝不静默降级成明文。"""
+    if not TLS_CERT and not TLS_KEY:
+        return None
+    if not (TLS_CERT and TLS_KEY):
+        raise SystemExit("TLS_CERT 和 TLS_KEY 必须同时设置")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(TLS_CERT, TLS_KEY)
+    return context
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    def end_headers(self):
+        # 只在 TLS 模式下发 HSTS：明文模式发 HSTS 会把用户锁在错误的 scheme 上。
+        if TLS_ACTIVE:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        super().end_headers()
 
     def log_message(self, format: str, *args):
         print(f'{self.client_address[0]} - {format % args}', flush=True)
@@ -76,7 +98,9 @@ class Handler(BaseHTTPRequestHandler):
         headers["X-Real-IP"] = self.client_address[0]
         forwarded = self.headers.get("X-Forwarded-For")
         headers["X-Forwarded-For"] = f"{forwarded}, {self.client_address[0]}" if forwarded else self.client_address[0]
-        headers["X-Forwarded-Proto"] = self.headers.get("X-Forwarded-Proto", "http")
+        headers["X-Forwarded-Proto"] = (
+            "https" if TLS_ACTIVE else self.headers.get("X-Forwarded-Proto", "http")
+        )
         headers["X-Forwarded-Prefix"] = PREFIX
         if body is not None:
             headers["Content-Length"] = str(len(body))
@@ -113,7 +137,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()
+    global TLS_ACTIVE
+    context = build_tls_context()
+    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    if context is not None:
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        TLS_ACTIVE = True
+        print(f"gateway: TLS enabled (cert={TLS_CERT})", flush=True)
+    else:
+        print("gateway: TLS disabled (plain HTTP)", flush=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

@@ -1002,7 +1002,7 @@ bootstrap_menu() {
 write_environment() {
   local host="$1" port="$2" path="$3" user="$4" password="$5" secret="$6"
   mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/data" "$INSTALL_DIR/xray-config"
-  chmod 700 "$INSTALL_DIR/data"
+  chmod 700 "$INSTALL_DIR/data" "$INSTALL_DIR/xray-config"
   cat >"$INSTALL_DIR/config/nodelite.env" <<EOF
 RUNTIME_BACKEND=native
 NODELITE_HOME=$INSTALL_DIR
@@ -1023,6 +1023,8 @@ UPSTREAM_PORT=$INTERNAL_PORT
 LISTEN_HOST=0.0.0.0
 LISTEN_PORT=$port
 ACCESS_PATH=$path
+TLS_CERT=${NODELITE_TLS_CERT:-}
+TLS_KEY=${NODELITE_TLS_KEY:-}
 EOF
   chmod 600 "$INSTALL_DIR/config/nodelite.env"
 }
@@ -1074,7 +1076,11 @@ service_crash_loop() {
 }
 
 wait_healthy() {
-  local i unit response health="http://127.0.0.1:$(read_key "$INSTALL_DIR/config/nodelite.env" LISTEN_PORT)/healthz"
+  # 直连内部端口：面板 healthz 永远明文，TLS 由 gateway 终止；
+  # 用公网端口探测会在启用 TLS 后误判成「服务没起来」。
+  local internal i unit response
+  internal="$(read_key "$INSTALL_DIR/config/nodelite.env" PANEL_INTERNAL_PORT)"
+  health="http://127.0.0.1:${internal:-18080}/healthz"
   for i in $(seq 1 45); do
     # Connection refused is expected for the first few seconds after systemd
     # starts the gateway. Capture it silently instead of presenting a normal
@@ -1112,8 +1118,10 @@ show_access() {
   host="$(read_key "$f" PUBLIC_HOST)"; port="$(read_key "$f" LISTEN_PORT)"; path="$(read_key "$f" ACCESS_PATH)"
   user="$(read_key "$f" ADMIN_USER)"; password="$(read_key "$f" "$PASSWORD_KEY")"
   [[ -n "$host" && -n "$port" && -n "$path" && -n "$user" && -n "$password" ]] || die "登录信息不完整，请运行 node 重设后台账号密码"
-  printf '\n访问地址：http://%s:%s/%s/login\n用户名：%s\n密码：%s\n安装目录：%s\n\n' \
-    "$host" "$port" "$path" "$user" "$password" "$INSTALL_DIR"
+  local scheme="http"
+  [[ -z "$(read_key "$f" TLS_CERT)" ]] || scheme="https"
+  printf '\n访问地址：%s://%s:%s/%s/login\n用户名：%s\n密码：%s\n安装目录：%s\n\n' \
+    "$scheme" "$host" "$port" "$path" "$user" "$password" "$INSTALL_DIR"
 }
 
 install_or_update() {
@@ -1163,6 +1171,9 @@ JSON
   svcb_enable || true
   install_shortcuts
   ok "NodeLite 原生版安装/更新完成（$(installed_version) / ${arch}）"; show_access
+  if [[ -z "$(read_key "$INSTALL_DIR/config/nodelite.env" TLS_CERT)" ]]; then
+    warn "面板目前是明文 HTTP：公网使用请执行 nodelite tls-cert <fullchain.pem> <privkey.pem>（或菜单 16）"
+  fi
   (( had_existing == 1 )) || printf '密码：%s\n' "$password"
 }
 
@@ -1173,6 +1184,46 @@ change_credentials() { require_native; local u="${2:-}" p="${3:-}"; [[ -n "$u" ]
 change_port() { require_native; local v="${2:-}"; [[ -n "$v" ]] || read -r -p "新端口: " v; valid_port "$v" || die "端口错误"; change_value_restart LISTEN_PORT "$v" nodelite-gateway.service; show_access; }
 change_path() { require_native; local v="${2:-$(random_path)}"; v="$(normalize_path "$v")" || die "路径错误"; change_value_restart ACCESS_PATH "$v" nodelite-gateway.service; show_access; }
 change_host() { require_native; local v="${2:-}"; [[ -n "$v" ]] || read -r -p "公网 IP/域名: " v; [[ -n "$v" && ! "$v" =~ [[:space:]/] ]] || die "地址错误"; change_value_restart PUBLIC_HOST "$v" nodelite-panel.service; show_access; }
+
+# 开启面板 HTTPS：证书与私钥由用户提供（Let's Encrypt / 商业证书均可）。
+# gateway 自己终止 TLS，不必再套 nginx；HSTS 也由 gateway 发。
+set_tls_cert() {
+  require_native
+  local cert="${1:-}" key="${2:-}" env_file="$INSTALL_DIR/config/nodelite.env"
+  [[ -n "$cert" && -n "$key" ]] || die "用法：nodelite tls-cert <fullchain.pem> <privkey.pem>"
+  [[ -r "$cert" ]] || die "证书不可读：$cert"
+  [[ -r "$key" ]] || die "私钥不可读：$key"
+  [[ "$cert$key" != *[[:space:]]* ]] || die "证书/私钥路径不能包含空白字符"
+  openssl x509 -in "$cert" -noout >/dev/null 2>&1 || die "不是有效的 PEM 证书：$cert"
+  local cert_pub key_pub
+  cert_pub="$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null | openssl sha256)"
+  key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl sha256)"
+  [[ -n "$cert_pub" && "$cert_pub" = "$key_pub" ]] || die "证书与私钥不匹配"
+  set_key "$env_file" TLS_CERT "$cert"
+  set_key "$env_file" TLS_KEY "$key"
+  service_ctl restart nodelite-gateway.service
+  wait_healthy
+  ok "面板已切换为 HTTPS"
+  show_access
+}
+
+set_tls_off() {
+  require_native
+  local env_file="$INSTALL_DIR/config/nodelite.env"
+  set_key "$env_file" TLS_CERT ""
+  set_key "$env_file" TLS_KEY ""
+  service_ctl restart nodelite-gateway.service
+  wait_healthy
+  warn "面板已回退为明文 HTTP，公网使用请尽快重新配置证书"
+  show_access
+}
+
+tls_cert_prompt() {
+  local cert key
+  read -r -p "证书链路径（fullchain.pem）: " cert
+  read -r -p "私钥路径（privkey.pem）: " key
+  set_tls_cert "$cert" "$key"
+}
 show_status() { require_native; service_ctl --no-pager --full status "${SERVICES[@]}" || true; show_access; }
 restart_services() { require_native; service_ctl restart "${SERVICES[@]}"; wait_healthy; ok "NodeLite 已重启"; }
 
@@ -1360,10 +1411,12 @@ menu() {
  13. 可选 Docker 兼容安装
  14. 屏蔽 SVCB/HTTPS DNS 记录（防 Fake-IP 直连与 QUIC 旁路）
  15. 取消 SVCB/HTTPS 屏蔽
+ 16. 开启面板 HTTPS（tls-cert）
+ 17. 回退明文 HTTP（tls-off）
   0. 退出
 ===================================================
 EOF
-  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 14) svcb_enable;; 15) svcb_disable;; 0) exit;; *) warn "无效选项";; esac; done
+  local c; read -r -p "请选择: " c; case "$c" in 1) install_or_update;; 2) change_credentials;; 3) change_port;; 4) change_path;; 5) change_host;; 6) show_status;; 7) restart_services;; 8) run_tcpfit;; 9) run_ip_check;; 10) enable_bbr_fq;; 11) disable_ipv6;; 12) uninstall_nodelite;; 13) install_docker_mode;; 14) svcb_enable;; 15) svcb_disable;; 16) tls_cert_prompt;; 17) set_tls_off;; 0) exit;; *) warn "无效选项";; esac; done
 }
 
-command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; shortcuts) install_shortcuts;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; dns-block) svcb_enable;; dns-unblock) svcb_disable;; dns-status) svcb_status;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|dns-block|dns-unblock|dns-status|uninstall|docker|shortcuts|menu]";; esac
+command="${1:-}"; case "$command" in "") [[ -t 0 ]] && bootstrap_menu || install_or_update;; install|update) install_or_update;; shortcuts) install_shortcuts;; credentials) change_credentials "$@";; port) change_port "$@";; path) change_path "$@";; host) change_host "$@";; status) show_status;; restart) restart_services;; tcpfit) run_tcpfit;; ipcheck) run_ip_check;; disable-ipv6) disable_ipv6;; enable-bbr-fq) enable_bbr_fq;; uninstall) uninstall_nodelite;; docker) install_docker_mode;; menu) bootstrap_menu;; dns-block) svcb_enable;; dns-unblock) svcb_disable;; dns-status) svcb_status;; tls-cert) set_tls_cert "$2" "$3";; tls-off) set_tls_off;; *) die "用法: install.sh [install|credentials|port|path|host|status|restart|tcpfit|ipcheck|disable-ipv6|enable-bbr-fq|dns-block|dns-unblock|dns-status|tls-cert <cert> <key>|tls-off|uninstall|docker|shortcuts|menu]";; esac

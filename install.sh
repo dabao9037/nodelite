@@ -11,6 +11,16 @@ done
 unset _dir
 export PATH
 
+# --retry-all-errors 是 curl 7.71 才有的；CentOS 7（7.29）、Debian 10（7.64）、
+# Ubuntu 18.04（7.58）带上它会在发请求前直接报 option unknown，连安装脚本和
+# 发行包都下不下来。做成函数而不是一次性变量：脚本可能在 curl 还没装时启动，
+# 等 ensure_tools 装好后再调用也能正确判断。
+curl_retry_all() {
+  if command -v curl >/dev/null 2>&1 && curl --retry-all-errors --version >/dev/null 2>&1; then
+    printf '%s' '--retry-all-errors'
+  fi
+}
+
 REPO="${NODELITE_GITHUB_REPO:-dabao9037/nodelite}"
 INSTALL_DIR="${NODELITE_DIR:-/opt/nodelite}"
 SYSTEMD_DIR="${NODELITE_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -790,7 +800,7 @@ latest_tag() {
     url="https://api.github.com/repos/$REPO/releases/latest?nodelite=$(date +%s)-$attempt-$RANDOM"
     payload="$(curl -fsSL \
       --connect-timeout 15 --max-time 60 \
-      --retry 3 --retry-all-errors --retry-delay 2 \
+      --retry 3 $(curl_retry_all) --retry-delay 2 \
       -H 'Accept: application/vnd.github+json' \
       -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
       "$url" 2>/dev/null || true)"
@@ -809,7 +819,7 @@ api_asset_url() {
   download_url="https://github.com/$REPO/releases/download/$tag/$asset"
   payload="$(curl -fsSL \
     --connect-timeout 15 --max-time 60 \
-    --retry 3 --retry-all-errors --retry-delay 2 \
+    --retry 3 $(curl_retry_all) --retry-delay 2 \
     -H 'Accept: application/vnd.github+json' \
     -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
     "https://api.github.com/repos/$REPO/releases/tags/$tag?nodelite=$(date +%s)-$RANDOM" 2>/dev/null || true)"
@@ -833,7 +843,7 @@ download_native_asset() {
     [[ "$url" == *\?* ]] && url="$url&$cache_bust" || url="$url?$cache_bust"
     if curl -fL \
       --connect-timeout 15 --max-time 600 \
-      --retry 3 --retry-all-errors --retry-delay 2 \
+      --retry 3 $(curl_retry_all) --retry-delay 2 \
       -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
       "$url" -o "$destination"; then
       [[ -s "$destination" ]] || die "下载到的原生发行包为空"
@@ -850,7 +860,7 @@ download_native_asset() {
   info "回退下载：$api_url"
   curl -fL \
     --connect-timeout 15 --max-time 600 \
-    --retry 3 --retry-all-errors --retry-delay 2 \
+    --retry 3 $(curl_retry_all) --retry-delay 2 \
     -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$api_url" -o "$destination"
   [[ -s "$destination" ]] || die "GitHub API 回退下载到的原生发行包为空"

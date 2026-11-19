@@ -1017,6 +1017,25 @@ bootstrap_menu() {
   menu
 }
 
+# Xray 的 metrics 监听 127.0.0.1:11111；很多机器上已经跑着别的 xray/exporter，
+# 撞端口会让 nodelite-xray 直接起不来（2026-11-19 CentOS 7 现场）。安装时挑空闲端口。
+pick_metrics_port() {
+  local existing candidate
+  existing="$(read_key "$INSTALL_DIR/config/nodelite.env" XRAY_METRICS_PORT 2>/dev/null || true)"
+  if [[ "$existing" =~ ^[0-9]+$ ]] && ! port_in_use "$existing"; then
+    printf '%s' "$existing"; return 0
+  fi
+  if ! port_in_use 11111; then printf '11111'; return 0; fi
+  for candidate in $(seq 11200 11299); do
+    port_in_use "$candidate" || { printf '%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+port_in_use() {
+  ss -Hltn 2>/dev/null | awk -v suffix=":$1$" '$4 ~ suffix {found=1} END {exit !found}'
+}
+
 write_environment() {
   local host="$1" port="$2" path="$3" user="$4" password="$5" secret="$6"
   mkdir -p "$INSTALL_DIR/config" "$INSTALL_DIR/data" "$INSTALL_DIR/xray-config"
@@ -1041,6 +1060,7 @@ UPSTREAM_PORT=$INTERNAL_PORT
 LISTEN_HOST=0.0.0.0
 LISTEN_PORT=$port
 ACCESS_PATH=$path
+XRAY_METRICS_PORT=$(pick_metrics_port || echo 11111)
 TLS_CERT=${NODELITE_TLS_CERT:-}
 TLS_KEY=${NODELITE_TLS_KEY:-}
 EOF
@@ -1189,6 +1209,11 @@ JSON
   svcb_enable || true
   install_shortcuts
   ok "NodeLite 原生版安装/更新完成（$(installed_version) / ${arch}）"; show_access
+  if [[ "$(service_prop nodelite-xray.service ActiveState)" != active ]]; then
+    warn "nodelite-xray 未能进入 active（面板与网关已起，节点暂不可用）"
+    journalctl -u nodelite-xray.service -n 15 --no-pager 2>/dev/null | sed 's/^/    /' || true
+    die "Xray 启动失败；修好后再执行 nodelite restart（常见原因：端口被占用、配置错误）"
+  fi
   if [[ -z "$(read_key "$INSTALL_DIR/config/nodelite.env" TLS_CERT)" ]]; then
     warn "面板目前是明文 HTTP：公网使用请执行 nodelite tls-cert <fullchain.pem> <privkey.pem>（或菜单 16）"
   fi

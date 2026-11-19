@@ -2146,3 +2146,16 @@ def test_xray_config_is_owner_only(panel):
     module, _ = panel
     module.write_config()
     assert (module.XRAY_CONFIG_PATH.stat().st_mode & 0o777) == 0o600
+
+
+def test_xray_metrics_port_comes_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_USER", "test-admin")
+    monkeypatch.setenv("ADMIN_" + "PASSWORD", "pw")
+    monkeypatch.setenv("APP_" + "SECRET", "secret")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "m.db"))
+    monkeypatch.setenv("NETGUARD_REQUIRED", "0")
+    monkeypatch.setenv("XRAY_METRICS_PORT", "11234")
+    sys.modules.pop("app.main", None)
+    module = importlib.import_module("app.main")
+    assert module.XRAY_METRICS_ADDRESS == "127.0.0.1:11234"
+    assert module.config_for([])["metrics"]["listen"] == "127.0.0.1:11234"

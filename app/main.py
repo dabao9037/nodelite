@@ -95,7 +95,9 @@ REALITY_FLOW = "xtls-rprx-vision"
 REALITY_FINGERPRINT = "chrome"
 REALITY_SPIDER_X = "/"
 XRAY_API_ADDRESS = "127.0.0.1:10085"
-XRAY_METRICS_ADDRESS = "127.0.0.1:11111"
+# Prometheus metrics 只是可观测性入口，默认 11111 经常和机器上已有的
+# xray/其他 exporter 撞端口；由安装器在 env 里挑一个空闲端口。
+XRAY_METRICS_ADDRESS = f"127.0.0.1:{int(os.getenv('XRAY_METRICS_PORT', '11111'))}"
 MIB = 1024 * 1024
 MAX_TRAFFIC_LIMIT_MB = 1_000_000_000
 # 会话：cookie 里只放随机 token，库里存 sha256；改密码时 cred_epoch 变化，

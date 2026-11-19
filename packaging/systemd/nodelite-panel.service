@@ -1,11 +1,13 @@
 [Unit]
-StartLimitIntervalSec=60
-StartLimitBurst=20
 Description=NodeLite panel (loopback only)
 After=network-online.target nodelite-netguard.service
 Wants=network-online.target nodelite-netguard.service
 
 [Service]
+# systemd 219（CentOS 7）不认 [Unit] 里的 StartLimit*，
+# 旧名字放在 [Service] 段新旧版本都能解析。
+StartLimitInterval=60
+StartLimitBurst=20
 Type=simple
 User=root
 Group=root

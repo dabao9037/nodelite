@@ -55,6 +55,14 @@ read_key() { [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" | tail -n1 || true; }
 set_key() { local f="$1" k="$2" v="$3" t; t="$(mktemp)"; [[ ! -f "$f" ]] || grep -v "^${k}=" "$f" >"$t" || true; printf '%s=%s\n' "$k" "$v" >>"$t"; install -m 600 "$t" "$f"; rm -f "$t"; }
 have_systemd() { command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; }
 service_ctl() { have_systemd || die "原生模式需要 systemd"; systemctl "$@"; }
+# `systemctl show --value` 是 systemd 230 才有的；CentOS 7 是 219，带上它会
+# 直接报 unrecognized option，脚本读到空串就误判服务没起来（2026-11-19 现场）。
+# 统一解析 "Key=Value" 输出，所有版本行为一致。
+service_prop() {
+  local unit="$1" prop="$2" out
+  out="$(service_ctl show "$unit" --property="$prop" 2>/dev/null || true)"
+  printf '%s' "${out#*=}"
+}
 
 # ==================== 屏蔽 SVCB(64) / HTTPS(65) DNS 记录 ====================
 # 这两类记录会把 ipv4hint / ipv6hint（真实地址）和 ech（加密 SNI 配置）直接写进
@@ -1059,10 +1067,10 @@ install_units() {
 service_states() {
   local unit state substate restarts result output=()
   for unit in "${SERVICES[@]}"; do
-    state="$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
-    substate="$(service_ctl show "$unit" --property=SubState --value 2>/dev/null || true)"
-    restarts="$(service_ctl show "$unit" --property=NRestarts --value 2>/dev/null || true)"
-    result="$(service_ctl show "$unit" --property=Result --value 2>/dev/null || true)"
+    state="$(service_prop "$unit" ActiveState)"
+    substate="$(service_prop "$unit" SubState)"
+    restarts="$(service_prop "$unit" NRestarts)"
+    result="$(service_prop "$unit" Result)"
     output+=("${unit#nodelite-}=${state:-unknown}/${substate:-unknown},重启=${restarts:-0},结果=${result:-unknown}")
   done
   printf '%s' "${output[*]}"
@@ -1079,9 +1087,9 @@ diagnose_services() {
 
 service_crash_loop() {
   local unit="$1" state restarts result
-  state="$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)"
-  restarts="$(service_ctl show "$unit" --property=NRestarts --value 2>/dev/null || true)"
-  result="$(service_ctl show "$unit" --property=Result --value 2>/dev/null || true)"
+  state="$(service_prop "$unit" ActiveState)"
+  restarts="$(service_prop "$unit" NRestarts)"
+  result="$(service_prop "$unit" Result)"
   [[ "$state" == failed ]] || { [[ "$state" != active ]] && { [[ "$restarts" =~ ^[0-9]+$ && "$restarts" -gt 0 ]] || [[ -n "$result" && "$result" != success ]]; }; }
 }
 
@@ -1111,7 +1119,7 @@ wait_healthy() {
     fi
     if (( i == 10 )); then
       for unit in "${SERVICES[@]}"; do
-        if [[ "$(service_ctl show "$unit" --property=ActiveState --value 2>/dev/null || true)" != active ]]; then
+        if [[ "$(service_prop "$unit" ActiveState)" != active ]]; then
           diagnose_services
           die "$unit 10 秒内未进入 active 状态"
         fi

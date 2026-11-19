@@ -293,6 +293,69 @@ def _ensure_table():
         run("nft", "add", "table", TABLE_FAMILY, TABLE)
 
 
+_NFT_JSON_SUPPORTED: bool | None = None
+
+
+def nft_json_supported() -> bool:
+    """nft < 0.9（CentOS 7 是 0.8）没有 -j；探测一次，之后全走文本解析。"""
+    global _NFT_JSON_SUPPORTED
+    if _NFT_JSON_SUPPORTED is None:
+        result = subprocess.run(
+            ["nft", "-j", "list", "tables"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _NFT_JSON_SUPPORTED = result.returncode == 0
+    return _NFT_JSON_SUPPORTED
+
+
+def _nft_table_text() -> str:
+    result = subprocess.run(
+        ["nft", "list", "table", TABLE_FAMILY, TABLE],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if result.returncode:
+        message = (result.stderr or result.stdout or "").lower()
+        if "no such file or directory" in message or "does not exist" in message or "no such" in message:
+            raise TableMissing(result.stderr.strip())
+        raise RuntimeError(result.stderr.strip() or "nft list failed")
+    return result.stdout
+
+
+def iter_text_sets(text: str):
+    """Yield (set-name, block-body) from `nft list table` output."""
+    for match in re.finditer(r"\bset\s+(\S+)\s*\{", text):
+        name = match.group(1)
+        depth = 0
+        index = match.end() - 1
+        start = index
+        while index < len(text):
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        yield name, text[start + 1:index]
+
+
+def text_set_elements(body: str) -> list[str]:
+    """`elements = { 1.2.3.4 timeout 15s, 5.6.7.8 ... }` → addresses."""
+    match = re.search(r"elements\s*=\s*\{(.*?)\}", body, re.S)
+    if not match:
+        return []
+    values = []
+    for chunk in match.group(1).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        # 旧版 concat 集合会写成 "1.2.3.4 . 0"，取地址部分
+        value = chunk.split(" . ")[0].split()[0]
+        values.append(value)
+    return values
+
+
 def _nft_json() -> list[dict]:
     try:
         payload = run("nft", "-j", "list", "table", TABLE_FAMILY, TABLE)
@@ -356,6 +419,24 @@ def installed_sources(desired: list[tuple[int, int, int]]) -> dict[int, set[str]
     """Read admitted kernel-set members so config changes do not evict them."""
     by_node = {node_id: port for node_id, port, _ in desired}
     sources = {port: set() for _, port, _ in desired}
+    if not nft_json_supported():
+        try:
+            text = _nft_table_text()
+        except TableMissing:
+            return sources
+        for name, body in iter_text_sets(text):
+            parsed = _parse_set_name(name)
+            if not parsed:
+                continue
+            node_id, family = parsed
+            port = by_node.get(node_id)
+            if port is None:
+                continue
+            for value in text_set_elements(body):
+                address = _element_address(value, family)
+                if address:
+                    sources[port].add(address)
+        return sources
     items = _nft_json()
     for item in items:
         nft_set = item.get("set")
@@ -518,8 +599,53 @@ def _set_flags_are_valid(value) -> bool:
     return "timeout" in flags and flags <= {"dynamic", "timeout"}
 
 
+def _validate_text_installed(desired: list[tuple[int, int, int]]) -> None:
+    """nft < 0.9 没有 JSON：用 `nft list` 文本做同等强度的关键项校验。
+
+    深度项（flag 的序列化形式、timeout 单位）拿不到，就只校验真正决定
+    设备限制是否生效的东西：链存在、集合名/类型/超时/容量、每个节点的
+    accept/reject 规则都在。
+    """
+    text = _nft_table_text()
+    if not re.search(r"\bchain\s+" + re.escape(CHAIN) + r"\s*\{", text):
+        raise InstalledMismatch("nftables input chain is incomplete")
+    blocks = dict(iter_text_sets(text))
+    expected = {node_id: (port, limit) for node_id, port, limit in desired}
+    for name, body in blocks.items():
+        parsed = _parse_set_name(name)
+        if not parsed:
+            raise InstalledMismatch("unexpected nftables set")
+        node_id, family = parsed
+        if family is None:
+            raise InstalledMismatch("legacy nftables device set requires migration")
+        if node_id not in expected:
+            raise InstalledMismatch(f"stale nftables set for removed node {node_id}")
+        expected_type = "ipv4_addr" if family == "ipv4" else "ipv6_addr"
+        if not re.search(rf"\btype\s+{expected_type}\b", body):
+            raise InstalledMismatch(f"invalid nftables set for node {node_id}")
+        if not re.search(r"\bflags\s+dynamic\s*,\s*timeout\b", body):
+            raise InstalledMismatch(f"invalid nftables set for node {node_id}")
+        if not re.search(rf"\btimeout\s+{DEVICE_TIMEOUT_SECONDS}s\b", body):
+            raise InstalledMismatch(f"invalid nftables set for node {node_id}")
+        if not re.search(rf"\bsize\s+{expected[node_id][1]}\b", body):
+            raise InstalledMismatch(f"invalid nftables set size for node {node_id}")
+        for role in (f"{family}-accept", f"{family}-reject"):
+            marker = f'comment "{COMMENT_PREFIX}{node_id}-{role}"'
+            if marker not in text:
+                raise InstalledMismatch(f"nftables rules for node {node_id} are incomplete")
+    expected_names = {
+        _set_name(node_id, family)
+        for node_id in expected
+        for family in ("ipv4", "ipv6")
+    }
+    if set(blocks) != expected_names:
+        raise InstalledMismatch("nftables device sets do not match desired limits")
+
+
 def validate_installed(desired: list[tuple[int, int, int]]) -> None:
     """Require the installed table to match desired nodes, limits and rules."""
+    if not nft_json_supported():
+        return _validate_text_installed(desired)
     items = _nft_json()
     chains = [item["chain"] for item in items if "chain" in item]
     if len(chains) != 1:

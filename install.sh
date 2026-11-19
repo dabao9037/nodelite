@@ -430,7 +430,7 @@ svcb_enable() {
   fi
   if ! svcb_version_ok; then
     warn "dnsmasq $(svcb_version || echo 未知) 低于 ${SVCB_DNSMASQ_MIN}，无 filter-rr，跳过过滤"
-    warn "release 包里没有可用的内置 dnsmasq：$SVCB_DNSMASQ_BUNDLED（重装或重新下载发行包可恢复）"
+    warn "release 包里没有可用的内置 dnsmasq：${SVCB_DNSMASQ_BUNDLED}（重装或重新下载发行包可恢复）"
     return 0
   fi
 
@@ -632,7 +632,7 @@ apt_update() {
     while IFS='|' read -r uri suite; do
       [[ -n "$suite" ]] || continue
       if apt_disable_suite "$suite" "$uri"; then
-        warn "apt 源「$uri $suite」已下架（Release 404），已注释并备份为 .nodelite-bak"
+        warn "apt 源「$uri ${suite}」已下架（Release 404），已注释并备份为 .nodelite-bak"
         fixed=1
       fi
     done <<<"$dead"
@@ -663,7 +663,7 @@ apt_install() {
     # 典型场景：EOL 的 bullseye-security 索引已冻结、pool 已清空（Debian 11
     # 已于 2026-08 结束 LTS），security 里的候选版本全是 404。此时优先装
     # 发行版 release 源里的版本，再跳过拿不到的包。
-    warn "apt-get install $* 失败（退出码 $rc），改为优先装 release 源版本："
+    warn "apt-get install $* 失败（退出码 ${rc}），改为优先装 release 源版本："
     sed 's/^/    /' "$out" >&2
     codename="$(apt_codename)"
     rc=0
@@ -679,7 +679,7 @@ apt_install() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing "$@" >>"$out" 2>&1 || rc=$?
   fi
   if (( rc != 0 )); then
-    warn "apt-get install $* 仍然失败（退出码 $rc），输出见上"
+    warn "apt-get install $* 仍然失败（退出码 ${rc}），输出见上"
   fi
   rm -f "$out"
   return "$rc"
@@ -702,7 +702,7 @@ ensure_tools() {
     yum install -y ca-certificates "${packages[@]}"
   else die "请先安装 curl、tar、openssl、iptables 和 iproute2/iproute"; fi
   for cmd in curl tar openssl ip; do
-    command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：$cmd（apt 输出见上；若源已损坏，请先修 /etc/apt/sources.list 再重试）"
+    command -v "$cmd" >/dev/null 2>&1 || die "依赖安装后仍找不到命令：${cmd}（apt 输出见上；若源已损坏，请先修 /etc/apt/sources.list 再重试）"
   done
   # netguard 的规则已改用 nft，iptables 只用于清理旧版 connlimit 链
   # （netguard.py 里还有 shutil.which 保护）。装不上不该把整机卡在安装阶段。

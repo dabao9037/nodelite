@@ -140,7 +140,7 @@ apt_update() {
     while IFS='|' read -r uri suite; do
       [[ -n "$suite" ]] || continue
       if apt_disable_suite "$suite" "$uri"; then
-        warn "apt 源「$uri $suite」已下架（Release 404），已注释并备份为 .nodelite-bak"
+        warn "apt 源「$uri ${suite}」已下架（Release 404），已注释并备份为 .nodelite-bak"
         fixed=1
       fi
     done <<<"$dead"
@@ -171,7 +171,7 @@ apt_install() {
     # 典型场景：EOL 的 bullseye-security 索引已冻结、pool 已清空（Debian 11
     # 已于 2026-08 结束 LTS），security 里的候选版本全是 404。此时优先装
     # 发行版 release 源里的版本，再跳过拿不到的包。
-    warn "apt-get install $* 失败（退出码 $rc），改为优先装 release 源版本："
+    warn "apt-get install $* 失败（退出码 ${rc}），改为优先装 release 源版本："
     sed 's/^/    /' "$out" >&2
     codename="$(apt_codename)"
     rc=0
@@ -187,7 +187,7 @@ apt_install() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing "$@" >>"$out" 2>&1 || rc=$?
   fi
   if (( rc != 0 )); then
-    warn "apt-get install $* 仍然失败（退出码 $rc），输出见上"
+    warn "apt-get install $* 仍然失败（退出码 ${rc}），输出见上"
   fi
   rm -f "$out"
   return "$rc"
@@ -654,7 +654,7 @@ install_packages() {
   fi
   for cmd in curl git openssl ip; do
     command -v "$cmd" >/dev/null 2>&1 \
-      || die "依赖安装后仍找不到命令：$cmd（apt 输出见上；若源已损坏，请先修 /etc/apt/sources.list 再重试）"
+      || die "依赖安装后仍找不到命令：${cmd}（apt 输出见上；若源已损坏，请先修 /etc/apt/sources.list 再重试）"
   done
 }
 

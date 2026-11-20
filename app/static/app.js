@@ -60,7 +60,7 @@ function trafficLimitText(node) {
 const subUrl = node => appUrl(node.sub_path);
 // Bump the query whenever the client-facing address changes so the browser
 // re-fetches the QR instead of showing a cached image.
-const qrStamp = node => `${node.port || ''}-${node.advertised_port || ''}-${node.egress_ip || ''}`;
+const qrStamp = node => `${node.port || ''}-${node.advertised_port || ''}-${node.advertised_host || ''}`;
 const subQrUrl = node => `${appUrl(node.sub_qr)}?base=${encodeURIComponent(baseUrl.toString())}&v=${encodeURIComponent(qrStamp(node))}`;
 const qrViews = new Map();
 
@@ -285,7 +285,7 @@ $('#createForm').addEventListener('submit', async event => {
     const body = {
       name: $('#name').value, protocol,
       port: $('#port').value ? Number($('#port').value) : null,
-      egress_ip: $('#egressIp').value.trim() || null,
+      advertised_host: $('#advertisedHost').value.trim() || null,
       max_devices: $('#maxDevices').value ? Number($('#maxDevices').value) : null,
       traffic_limit_mb: $('#trafficLimitMb').value ? Number($('#trafficLimitMb').value) : null,
       ...expirationPayload()
@@ -340,6 +340,7 @@ $('#list').addEventListener('click', async event => {
       const node = nodes.find(item => item.id === Number(edit.dataset.edit));
       $('#editId').value = node.id;
       $('#editName').value = node.name;
+      $('#editAdvertisedHost').value = node.advertised_host || '';
       $('#editEgressIp').value = node.egress_ip || '';
       $('#editAdvertisedPort').value = node.advertised_port || '';
       $('#editMaxDevices').value = node.max_devices || '';
@@ -367,6 +368,7 @@ $('#editForm').addEventListener('submit', async event => {
   try {
     const body = {
       name: $('#editName').value,
+      advertised_host: $('#editAdvertisedHost').value.trim() || null,
       egress_ip: $('#editEgressIp').value.trim() || null,
       advertised_port: $('#editAdvertisedPort').value ? Number($('#editAdvertisedPort').value) : null,
       max_devices: $('#editMaxDevices').value ? Number($('#editMaxDevices').value) : null,
@@ -380,6 +382,13 @@ $('#editForm').addEventListener('submit', async event => {
 });
 
 $('#refresh').addEventListener('click', () => load().catch(showError));
+async function loadMeta() {
+  try {
+    const meta = await api('api/meta');
+    if (meta && meta.version) $('#version').textContent = meta.version;
+  } catch (error) { /* version is decorative; keep the panel usable */ }
+}
+loadMeta().catch(() => {});
 loadServerIps().catch(() => {});
 load().then(() => {
   telemetryTimer = setInterval(() => refreshTelemetry().catch(showError), 2000);

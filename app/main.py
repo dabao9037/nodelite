@@ -195,6 +195,27 @@ def normalize_egress_ip(value: str | None) -> str | None:
         raise ValueError("出口 IP 必须是有效的 IPv4 或 IPv6 地址") from None
 
 
+def normalize_advertised_host(value: str | None) -> str | None:
+    """Display-only host for link / QR / subscription (e.g. a relay address).
+
+    Accepts an IP literal or a DNS name; never touches the xray config.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("对外 IP 必须是 IP 或域名")
+    value = value.strip().strip("[]").split("%", 1)[0]
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        pass
+    if len(value) <= 253 and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", value) and "." in value:
+        return value
+    raise ValueError("对外 IP 必须是 IP 或域名")
+
+
 class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str = Field(min_length=1, max_length=80)
     protocol: str
@@ -205,7 +226,13 @@ class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     destination: str | None = None
     server_name: str | None = None
     egress_ip: str | None = None
+    advertised_host: str | None = None
     advertised_port: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("advertised_host", mode="before")
+    @classmethod
+    def validate_advertised_host(cls, value):
+        return normalize_advertised_host(value)
 
     @field_validator("egress_ip", mode="before")
     @classmethod
@@ -216,7 +243,13 @@ class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
 class NodeUpdate(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     egress_ip: str | None = None
+    advertised_host: str | None = None
     advertised_port: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("advertised_host", mode="before")
+    @classmethod
+    def validate_advertised_host(cls, value):
+        return normalize_advertised_host(value)
 
     @field_validator("egress_ip", mode="before")
     @classmethod
@@ -271,6 +304,9 @@ NODE_MIGRATIONS = (
     # keeps listening on `port`; this only changes what the client is told, so a
     # relay that maps 1.1.1.1:200 -> node:100 needs no xray change.
     (15, "advertised_port", "advertised_port INTEGER"),
+    # Display-only host for link / QR / subscription (relay address). Never
+    # written into the xray config: `egress_ip` remains the sendThrough binding.
+    (16, "advertised_host", "advertised_host TEXT"),
 )
 # The fully migrated schema, used when rebuilding a table that still holds rows.
 NODES_FULL_SCHEMA = ", ".join(
@@ -1380,7 +1416,11 @@ def node_host(row, host: str | None = None) -> str:
     The per-node egress IP wins over the panel's install-time PUBLIC_HOST so a
     multi-IP server can expose different nodes on different addresses.
     """
-    return (_row_egress(row) or host or PUBLIC_HOST).strip()
+    try:
+        advertised = (row["advertised_host"] or "").strip()
+    except (KeyError, IndexError):
+        advertised = ""
+    return (advertised or _row_egress(row) or host or PUBLIC_HOST).strip()
 
 
 def node_port(row) -> int:
@@ -1436,6 +1476,7 @@ def serial(row, host: str | None = None):
         "name": row["name"],
         "protocol": row["protocol"],
         "port": row["port"],
+        "advertised_host": row["advertised_host"],
         "advertised_port": row["advertised_port"],
         "enabled": bool(row["enabled"]),
         "disabled_reason": row["disabled_reason"],
@@ -1601,6 +1642,25 @@ def server_ips(_=Depends(require_admin)):
     return {"ips": local_public_ips()}
 
 
+def app_version() -> str:
+    """Version string baked into the installed tree (VERSION file) or env."""
+    for path in (os.environ.get("NODELITE_VERSION_FILE"), str(NODELITE_HOME / "VERSION")):
+        if not path:
+            continue
+        try:
+            value = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return os.environ.get("NODELITE_VERSION", "").strip() or "dev"
+
+
+@app.get("/api/meta")
+def meta(_=Depends(require_admin)):
+    return {"version": app_version()}
+
+
 @app.post("/api/nodes", status_code=201)
 def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
     protocol = payload.protocol.lower().strip()
@@ -1636,11 +1696,12 @@ def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
         try:
             cursor = conn.execute(
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
-                   max_connections, max_devices, traffic_limit_mb, sub_token, egress_ip, advertised_port)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   max_connections, max_devices, traffic_limit_mb, sub_token, egress_ip,
+                   advertised_host, advertised_port)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
                  None, max_devices, payload.traffic_limit_mb, new_sub_token(), payload.egress_ip,
-                 payload.advertised_port),
+                 payload.advertised_host, payload.advertised_port),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1679,6 +1740,9 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         egress_ip = old["egress_ip"]
         if "egress_ip" in payload.model_fields_set:
             egress_ip = payload.egress_ip
+        adv_host = old["advertised_host"]
+        if "advertised_host" in payload.model_fields_set:
+            adv_host = payload.advertised_host
         advertised_port = old["advertised_port"]
         if "advertised_port" in payload.model_fields_set:
             advertised_port = payload.advertised_port
@@ -1698,9 +1762,10 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
                 disabled_reason = None
         conn.execute(
             """UPDATE nodes SET name=?, expires_at=?, max_devices=?, traffic_limit_mb=?,
-               egress_ip=?, advertised_port=?, enabled=?, disabled_reason=? WHERE id=?""",
-            (name, new_expiry, max_devices, traffic_limit_mb, egress_ip, advertised_port,
-             enabled, disabled_reason, node_id),
+               egress_ip=?, advertised_host=?, advertised_port=?, enabled=?, disabled_reason=?
+               WHERE id=?""",
+            (name, new_expiry, max_devices, traffic_limit_mb, egress_ip, adv_host,
+             advertised_port, enabled, disabled_reason, node_id),
         )
         conn.commit()
     try:
@@ -1709,10 +1774,11 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         with closing(connect_db()) as conn:
             conn.execute(
                 """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?,
-                   traffic_limit_mb=?, egress_ip=?, advertised_port=?, enabled=?, disabled_reason=? WHERE id=?""",
+                   traffic_limit_mb=?, egress_ip=?, advertised_host=?, advertised_port=?,
+                   enabled=?, disabled_reason=? WHERE id=?""",
                 (old["name"], old["expires_at"], old["max_connections"], old["max_devices"],
-                 old["traffic_limit_mb"], old["egress_ip"], old["advertised_port"],
-                 old["enabled"], old["disabled_reason"], node_id),
+                 old["traffic_limit_mb"], old["egress_ip"], old["advertised_host"],
+                 old["advertised_port"], old["enabled"], old["disabled_reason"], node_id),
             )
             conn.commit()
         apply_runtime(force=True)

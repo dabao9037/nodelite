@@ -74,7 +74,7 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,max_devices,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, None, 0, 0)
-    assert versions == 15
+    assert versions == 16
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
     assert "egress_ip" in columns
@@ -1034,13 +1034,16 @@ def test_server_ips_endpoint_lists_detected_public_ips(panel, monkeypatch):
     assert client.get("/api/server-ips").json() == {"ips": ["1.1.1.1", "2.2.2.2"]}
 
 
-def test_node_form_exposes_egress_ip_selector(panel):
+def test_node_form_exposes_advertised_host_selector(panel):
     module, client = panel
     login(client)
     html = client.get("/").text
-    assert 'id="egressIp"' in html and 'id="egressIpOptions"' in html and 'id="editEgressIp"' in html
+    assert 'id="advertisedHost"' in html and 'id="egressIpOptions"' in html and 'id="editAdvertisedHost"' in html
     script = (Path(module.BASE_DIR) / "static/app.js").read_text()
-    assert "egress_ip" in script and "api/server-ips" in script
+    assert "advertised_host" in script and "api/server-ips" in script
+    # Display host and xray egress source are separate fields.
+    assert 'id="editEgressIp"' in html
+    assert "advertised_host" in script and "egress_ip" in script
 
 
 def test_shadowsocks_password_rules_and_invalid_method(panel):
@@ -2208,3 +2211,39 @@ def test_advertised_port_is_validated(panel):
             "name": f"bad-{bad}", "protocol": "socks", "port": 22098, "advertised_port": bad,
         })
         assert response.status_code == 422
+
+
+def test_advertised_host_is_display_only(panel):
+    module, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "relay-host", "protocol": "socks", "port": 22099,
+        "advertised_host": "1.1.1.1", "advertised_port": 200,
+    })
+    assert created.status_code == 201, created.text
+    node = created.json()
+    assert node["advertised_host"] == "1.1.1.1"
+    parsed = urlsplit(node["link"])
+    assert parsed.hostname == "1.1.1.1" and parsed.port == 200
+
+    # The relay address must never leak into xray.
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes WHERE id=1").fetchone()
+    configuration = module.config_for([row])
+    assert not any(o.get("sendThrough") for o in configuration["outbounds"])
+    assert module.inbound(row)["port"] == 22099
+
+    cleared = client.put(f"/api/nodes/{node['id']}", json={"advertised_host": None})
+    assert cleared.status_code == 200, cleared.text
+    assert urlsplit(cleared.json()["link"]).hostname == "node.example.test"
+
+    assert client.put(f"/api/nodes/{node['id']}", json={"advertised_host": "not a host"}).status_code == 422
+
+
+def test_meta_reports_version(panel, monkeypatch):
+    module, client = panel
+    login(client)
+    monkeypatch.setenv("NODELITE_VERSION_FILE", "")
+    monkeypatch.setenv("NODELITE_VERSION", "v9.9.9-test")
+    assert client.get("/api/meta").json()["version"] == "v9.9.9-test"

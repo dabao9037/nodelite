@@ -205,6 +205,7 @@ class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     destination: str | None = None
     server_name: str | None = None
     egress_ip: str | None = None
+    advertised_port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("egress_ip", mode="before")
     @classmethod
@@ -215,6 +216,7 @@ class NodeInput(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
 class NodeUpdate(ExpirationFields, TrafficLimitFields, DeviceLimitFields):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     egress_ip: str | None = None
+    advertised_port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("egress_ip", mode="before")
     @classmethod
@@ -265,6 +267,10 @@ NODE_MIGRATIONS = (
     (13, "sub_token", "sub_token TEXT"),
     # Optional per-node source/exit IP. Empty means the system default route.
     (14, "egress_ip", "egress_ip TEXT"),
+    # Optional port advertised to clients (link / QR / subscription). The node
+    # keeps listening on `port`; this only changes what the client is told, so a
+    # relay that maps 1.1.1.1:200 -> node:100 needs no xray change.
+    (15, "advertised_port", "advertised_port INTEGER"),
 )
 # The fully migrated schema, used when rebuilding a table that still holds rows.
 NODES_FULL_SCHEMA = ", ".join(
@@ -1377,18 +1383,32 @@ def node_host(row, host: str | None = None) -> str:
     return (_row_egress(row) or host or PUBLIC_HOST).strip()
 
 
+def node_port(row) -> int:
+    """Port advertised to clients: per-node advertised_port wins over listener.
+
+    A relay in front of the node (1.1.1.1:200 -> node:100) only needs the
+    advertised value; xray keeps listening on ``port``.
+    """
+    try:
+        advertised = row["advertised_port"]
+    except (KeyError, IndexError):
+        advertised = None
+    return int(advertised or row["port"])
+
+
 def link_for(row, host: str | None = None):
     cfg = json.loads(row["config"])
     name = quote(row["name"], safe="")
     host = node_host(row, host)
+    port = node_port(row)
     if row["protocol"] == "socks":
         username = quote(cfg["username"], safe="")
         password = quote(cfg["password"], safe="")
-        return f"socks://{username}:{password}@{host}:{row['port']}#{name}"
+        return f"socks://{username}:{password}@{host}:{port}#{name}"
     if row["protocol"] == "shadowsocks":
         userinfo = f"{config_shadowsocks_method(cfg)}:{cfg['password']}"
         auth = base64.urlsafe_b64encode(userinfo.encode()).decode().rstrip("=")
-        return f"ss://{auth}@{host}:{row['port']}#{name}"
+        return f"ss://{auth}@{host}:{port}#{name}"
     query = urlencode(
         {
             "type": REALITY_NETWORK,
@@ -1401,7 +1421,7 @@ def link_for(row, host: str | None = None):
             "spx": REALITY_SPIDER_X,
         }, quote_via=quote, safe="",
     )
-    return f"vless://{cfg['uuid']}@{host}:{row['port']}?{query}#{name}"
+    return f"vless://{cfg['uuid']}@{host}:{port}?{query}#{name}"
 
 
 def serial(row, host: str | None = None):
@@ -1416,6 +1436,7 @@ def serial(row, host: str | None = None):
         "name": row["name"],
         "protocol": row["protocol"],
         "port": row["port"],
+        "advertised_port": row["advertised_port"],
         "enabled": bool(row["enabled"]),
         "disabled_reason": row["disabled_reason"],
         "egress_ip": row["egress_ip"],
@@ -1615,10 +1636,11 @@ def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
         try:
             cursor = conn.execute(
                 """INSERT INTO nodes(name, protocol, port, config, created_at, expires_at,
-                   max_connections, max_devices, traffic_limit_mb, sub_token, egress_ip)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                   max_connections, max_devices, traffic_limit_mb, sub_token, egress_ip, advertised_port)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (name, protocol, port, json.dumps(cfg), int(time.time()), expires_at,
-                 None, max_devices, payload.traffic_limit_mb, new_sub_token(), payload.egress_ip),
+                 None, max_devices, payload.traffic_limit_mb, new_sub_token(), payload.egress_ip,
+                 payload.advertised_port),
             )
             conn.commit()
             node_id = cursor.lastrowid
@@ -1657,6 +1679,9 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         egress_ip = old["egress_ip"]
         if "egress_ip" in payload.model_fields_set:
             egress_ip = payload.egress_ip
+        advertised_port = old["advertised_port"]
+        if "advertised_port" in payload.model_fields_set:
+            advertised_port = payload.advertised_port
         enabled = int(old["enabled"])
         disabled_reason = old["disabled_reason"]
         if new_expiry is not None and new_expiry <= int(time.time()):
@@ -1673,8 +1698,8 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
                 disabled_reason = None
         conn.execute(
             """UPDATE nodes SET name=?, expires_at=?, max_devices=?, traffic_limit_mb=?,
-               egress_ip=?, enabled=?, disabled_reason=? WHERE id=?""",
-            (name, new_expiry, max_devices, traffic_limit_mb, egress_ip,
+               egress_ip=?, advertised_port=?, enabled=?, disabled_reason=? WHERE id=?""",
+            (name, new_expiry, max_devices, traffic_limit_mb, egress_ip, advertised_port,
              enabled, disabled_reason, node_id),
         )
         conn.commit()
@@ -1684,9 +1709,10 @@ def update(node_id: int, payload: NodeUpdate, request: Request, _=Depends(requir
         with closing(connect_db()) as conn:
             conn.execute(
                 """UPDATE nodes SET name=?, expires_at=?, max_connections=?, max_devices=?,
-                   traffic_limit_mb=?, egress_ip=?, enabled=?, disabled_reason=? WHERE id=?""",
+                   traffic_limit_mb=?, egress_ip=?, advertised_port=?, enabled=?, disabled_reason=? WHERE id=?""",
                 (old["name"], old["expires_at"], old["max_connections"], old["max_devices"],
-                 old["traffic_limit_mb"], old["egress_ip"], old["enabled"], old["disabled_reason"], node_id),
+                 old["traffic_limit_mb"], old["egress_ip"], old["advertised_port"],
+                 old["enabled"], old["disabled_reason"], node_id),
             )
             conn.commit()
         apply_runtime(force=True)
@@ -1971,7 +1997,7 @@ def clash_proxy(row, host: str | None = None) -> dict:
     proxy = {
         "name": clash_proxy_name(row),
         "server": node_host(row, host),
-        "port": int(row["port"]),
+        "port": node_port(row),
     }
     if row["protocol"] == "socks":
         proxy.update(type="socks5", username=cfg["username"], password=cfg["password"], udp=True)
@@ -2029,7 +2055,7 @@ def clash_config(rows, host: str | None = None) -> str:
 
 def singbox_outbound(row, host: str | None = None) -> dict:
     cfg = json.loads(row["config"])
-    outbound = {"tag": clash_proxy_name(row), "server": node_host(row, host), "server_port": int(row["port"])}
+    outbound = {"tag": clash_proxy_name(row), "server": node_host(row, host), "server_port": node_port(row)}
     if row["protocol"] == "socks":
         outbound.update(type="socks", version="5", username=cfg["username"], password=cfg["password"])
     elif row["protocol"] == "shadowsocks":

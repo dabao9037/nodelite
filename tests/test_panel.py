@@ -74,7 +74,7 @@ def test_repeatable_migration_preserves_legacy_nodes(tmp_path, monkeypatch):
     row = connection.execute("SELECT name,expires_at,max_connections,max_devices,traffic_uplink_base,traffic_downlink_base FROM nodes").fetchone()
     versions = connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0]
     assert row == ("legacy", None, None, None, 0, 0)
-    assert versions == 14
+    assert versions == 15
     assert columns["traffic_uplink_base"][3] == 1
     assert columns["traffic_limit_mb"][3] == 0
     assert "egress_ip" in columns
@@ -2159,3 +2159,52 @@ def test_xray_metrics_port_comes_from_env(tmp_path, monkeypatch):
     module = importlib.import_module("app.main")
     assert module.XRAY_METRICS_ADDRESS == "127.0.0.1:11234"
     assert module.config_for([])["metrics"]["listen"] == "127.0.0.1:11234"
+
+
+def test_advertised_port_changes_link_qr_and_subscription_only(panel):
+    module, client = panel
+    login(client)
+    created = client.post("/api/nodes", json={
+        "name": "relay", "protocol": "socks", "port": 22097,
+        "egress_ip": "1.1.1.1", "advertised_port": 200,
+    })
+    assert created.status_code == 201, created.text
+    node = created.json()
+    assert node["port"] == 22097
+    assert node["advertised_port"] == 200
+
+    # Client-facing surfaces use the relay address.
+    parsed = urlsplit(node["link"])
+    assert parsed.hostname == "1.1.1.1" and parsed.port == 200
+    public = TestClient(module.app)
+    decoded = base64.b64decode(
+        public.get(f"/{node['sub_path']}", headers={"user-agent": "v2rayN/7.0"}).text,
+        validate=True,
+    ).decode()
+    assert "@1.1.1.1:200" in decoded
+    clash = public.get(f"/{node['sub_path']}?target=clash").text
+    assert '"server": "1.1.1.1"' in clash and '"port": 200' in clash
+
+    # Actual listener and xray config stay on the original port.
+    with sqlite3.connect(module.DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM nodes WHERE id=1").fetchone()
+    assert row["port"] == 22097
+    assert module.inbound(row)["port"] == 22097
+    qr = client.get(f"/api/nodes/{node['id']}/qr")
+    assert qr.status_code == 200 and qr.headers["content-type"] == "image/png"
+
+    # Clearing falls back to the listener port.
+    cleared = client.put(f"/api/nodes/{node['id']}", json={"advertised_port": None})
+    assert cleared.status_code == 200, cleared.text
+    assert urlsplit(cleared.json()["link"]).port == 22097
+
+
+def test_advertised_port_is_validated(panel):
+    module, client = panel
+    login(client)
+    for bad in (0, 70000):
+        response = client.post("/api/nodes", json={
+            "name": f"bad-{bad}", "protocol": "socks", "port": 22098, "advertised_port": bad,
+        })
+        assert response.status_code == 422

@@ -58,13 +58,16 @@ function trafficLimitText(node) {
 // The subscription URL is built from the URL the admin is using right now
 // (scheme, host, port and random access path), so it always matches the panel.
 const subUrl = node => appUrl(node.sub_path);
-const subQrUrl = node => `${appUrl(node.sub_qr)}?base=${encodeURIComponent(baseUrl.toString())}`;
+// Bump the query whenever the client-facing address changes so the browser
+// re-fetches the QR instead of showing a cached image.
+const qrStamp = node => `${node.port || ''}-${node.advertised_port || ''}-${node.egress_ip || ''}`;
+const subQrUrl = node => `${appUrl(node.sub_qr)}?base=${encodeURIComponent(baseUrl.toString())}&v=${encodeURIComponent(qrStamp(node))}`;
 const qrViews = new Map();
 
 function qrPanel(node) {
   const view = qrViews.get(node.id) || 'node';
   const sub = view === 'sub';
-  const src = sub ? subQrUrl(node) : appUrl(node.qr);
+  const src = sub ? subQrUrl(node) : `${appUrl(node.qr)}?v=${encodeURIComponent(qrStamp(node))}`;
   const alt = `${node.name} ${sub ? '订阅二维码' : '节点二维码'}`;
   return `
       <div class="qr-box">
@@ -338,6 +341,7 @@ $('#list').addEventListener('click', async event => {
       $('#editId').value = node.id;
       $('#editName').value = node.name;
       $('#editEgressIp').value = node.egress_ip || '';
+      $('#editAdvertisedPort').value = node.advertised_port || '';
       $('#editMaxDevices').value = node.max_devices || '';
       $('#editTrafficLimitMb').value = node.traffic_limit_mb || '';
       $('#editExpirationMode').value = node.expires_at ? 'date' : 'never';
@@ -364,6 +368,7 @@ $('#editForm').addEventListener('submit', async event => {
     const body = {
       name: $('#editName').value,
       egress_ip: $('#editEgressIp').value.trim() || null,
+      advertised_port: $('#editAdvertisedPort').value ? Number($('#editAdvertisedPort').value) : null,
       max_devices: $('#editMaxDevices').value ? Number($('#editMaxDevices').value) : null,
       traffic_limit_mb: $('#editTrafficLimitMb').value ? Number($('#editTrafficLimitMb').value) : null,
       ...expirationPayload('edit')

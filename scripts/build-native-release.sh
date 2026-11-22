@@ -103,6 +103,7 @@ install -m 0755 "$DNSMASQ_BIN" "$PKG/bin/dnsmasq"
   || { echo "内置 dnsmasq 版本不对：$("$PKG/bin/dnsmasq" --version | head -n1)" >&2; exit 68; }
 
 cp "$ROOT"/packaging/systemd/*.service "$PKG/systemd/"
+cp "$ROOT/config/reality-targets.json" "$PKG/config/reality-targets.json"
 cp "$ROOT/install.sh" "$PKG/install.sh"
 cp "$ROOT/install-docker.sh" "$PKG/install-docker.sh"
 chmod 0755 "$PKG/install.sh" "$PKG/install-docker.sh"

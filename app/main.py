@@ -1661,6 +1661,35 @@ def meta(_=Depends(require_admin)):
     return {"version": app_version()}
 
 
+REALITY_TARGETS_BUNDLED = Path(os.environ.get(
+    "REALITY_TARGETS_BUNDLED", str(NODELITE_HOME / "config" / "reality-targets.json")))
+
+
+def reality_target_groups():
+    """Bundled Reality disguise targets (single source of truth for the UI)."""
+    try:
+        doc = json.loads(REALITY_TARGETS_BUNDLED.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    groups = []
+    for group in doc.get("groups") or []:
+        label = str(group.get("label") or "").strip()
+        targets = []
+        for target in group.get("targets") or []:
+            name = str(target.get("name") or "").strip()
+            host = str(target.get("host") or "").strip()
+            if label and name and host:
+                targets.append({"name": name, "host": host})
+        if targets:
+            groups.append({"label": label, "targets": targets})
+    return groups
+
+
+@app.get("/api/reality-targets")
+def reality_targets(_=Depends(require_admin)):
+    return {"groups": reality_target_groups()}
+
+
 @app.post("/api/nodes", status_code=201)
 def create(payload: NodeInput, request: Request, _=Depends(require_admin)):
     protocol = payload.protocol.lower().strip()

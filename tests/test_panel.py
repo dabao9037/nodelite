@@ -382,28 +382,10 @@ def test_reality_preset_selector_and_custom_fallback(panel):
     login(client)
     home = client.get("/")
     assert home.status_code == 200
-    default_option = '<option value="www.debian.org">Debian · 开源操作系统（推荐）</option>'
-    assert default_option in home.text
-    expected_groups = {
-        "美国": ("www.debian.org", "www.postgresql.org"),
-        "英国": ("www.skao.int", "www.sciencemuseum.org.uk"),
-        "日本": ("www.4gamer.net", "www.famitsu.com"),
-        "东南亚": ("www.a-star.edu.sg", "www.visitsingapore.com"),
-        "欧洲": ("www.fraunhofer.de", "www.gog.com"),
-        "香港": ("www.hkstp.org", "www.discoverhongkong.com"),
-        "迪拜": ("www.visitdubai.com", "www.dm.gov.ae"),
-    }
-    for group, hosts in expected_groups.items():
-        assert f'<optgroup label="{group}">' in home.text
-        for host in hosts:
-            assert f'value="{host}"' in home.text
-    for removed_host in (
-        "www.apple.com", "www.microsoft.com", "www.bbc.co.uk", "www.gov.uk",
-        "www.sony.jp", "www.nintendo.co.jp", "www.singaporeair.com", "www.dbs.com",
-        "www.ikea.com", "www.cathaypacific.com", "www.hangseng.com",
-        "www.nature.com", "www.visitfinland.com", "www.animenewsnetwork.com",
-    ):
-        assert f'value="{removed_host}"' not in home.text
+    assert '<select id="realityPreset">' in home.text
+    assert "loadRealityTargets" in (Path(module.BASE_DIR) / "static/app.js").read_text()
+    # 硬编码选项已移除，列表由 /api/reality-targets 动态渲染（见下一条用例）
+    assert '<optgroup label=' not in home.text
     assert 'value="custom"' in home.text
     assert '<input id="serverName" value="www.debian.org">' in home.text
     assert '<input id="destination" value="www.debian.org:443">' in home.text
@@ -2247,3 +2229,17 @@ def test_meta_reports_version(panel, monkeypatch):
     monkeypatch.setenv("NODELITE_VERSION_FILE", "")
     monkeypatch.setenv("NODELITE_VERSION", "v9.9.9-test")
     assert client.get("/api/meta").json()["version"] == "v9.9.9-test"
+
+
+def test_reality_targets_api_lists_bundled_groups(panel):
+    module, client = panel
+    login(client)
+    data = client.get("/api/reality-targets").json()
+    groups = data["groups"]
+    assert len(groups) == 7
+    hosts = [t["host"] for g in groups for t in g["targets"]]
+    assert len(hosts) == 14
+    assert "www.imperial.ac.uk" in hosts
+    assert "www.hko.gov.hk" in hosts
+    assert "www.sciencemuseum.org.uk" not in hosts
+    assert "www.discoverhongkong.com" not in hosts

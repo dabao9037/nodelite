@@ -236,6 +236,28 @@ function updateShadowsocksMethod() {
   }
 }
 
+async function loadRealityTargets(){
+  const sel = $('#realityPreset');
+  try{
+    const d = await api('api/reality-targets');
+    const custom = sel.querySelector('option[value="custom"]');
+    (d.groups || []).forEach(g => {
+      const og = document.createElement('optgroup');
+      og.label = g.label;
+      (g.targets || []).forEach(t => {
+        const o = document.createElement('option');
+        o.value = t.host;
+        o.textContent = t.name + ' · ' + String(g.label).split(' · ')[0];
+        og.appendChild(o);
+      });
+      sel.insertBefore(og, custom);
+    });
+    const first = sel.querySelector('optgroup option');
+    if (first) sel.value = first.value;
+  }catch(e){ /* 读不到列表时保留自定义输入，不阻断建节点 */ }
+  updateRealityPreset();
+}
+
 function updateRealityPreset() {
   const value = $('#realityPreset').value;
   const custom = value === 'custom';
@@ -276,6 +298,7 @@ bindExpiration('#expirationMode', '#expirationDateField', '#expirationDaysField'
 bindExpiration('#editExpirationMode', '#editExpirationDateField', '#editExpirationDaysField');
 updateShadowsocksMethod();
 updateRealityPreset();
+loadRealityTargets();
 
 $('#createForm').addEventListener('submit', async event => {
   event.preventDefault();

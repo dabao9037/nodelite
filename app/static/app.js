@@ -236,26 +236,83 @@ function updateShadowsocksMethod() {
   }
 }
 
-async function loadRealityTargets(){
+const REALITY_TARGET_GROUPS = [
+  {
+    label: "美国 · 开源软件基础设施",
+    targets: [
+      { name: "Debian", host: "www.debian.org" },
+      { name: "PostgreSQL", host: "www.postgresql.org" },
+    ]
+  },
+  {
+    label: "英国 · 科研设施 / 高校",
+    targets: [
+      { name: "SKAO", host: "www.skao.int" },
+      { name: "Imperial College London", host: "www.imperial.ac.uk" },
+    ]
+  },
+  {
+    label: "日本 · 二次元 / 游戏媒体",
+    targets: [
+      { name: "4Gamer", host: "www.4gamer.net" },
+      { name: "Famitsu", host: "www.famitsu.com" },
+    ]
+  },
+  {
+    label: "东南亚 · 科研机构 / 旅游资讯",
+    targets: [
+      { name: "A*STAR", host: "www.a-star.edu.sg" },
+      { name: "Visit Singapore", host: "www.visitsingapore.com" },
+    ]
+  },
+  {
+    label: "欧洲 · 科研 / 游戏平台",
+    targets: [
+      { name: "Fraunhofer", host: "www.fraunhofer.de" },
+      { name: "GOG", host: "www.gog.com" },
+    ]
+  },
+  {
+    label: "香港 · 科创园区 / 公共服务",
+    targets: [
+      { name: "HKSTP", host: "www.hkstp.org" },
+      { name: "Hong Kong Observatory", host: "www.hko.gov.hk" },
+    ]
+  },
+  {
+    label: "迪拜 · 旅游资讯 / 政务服务",
+    targets: [
+      { name: "Visit Dubai", host: "www.visitdubai.com" },
+      { name: "Dubai Municipality", host: "www.dm.gov.ae" },
+    ]
+  },
+];
+
+// 列表内嵌在代码里：不读文件、不调接口，装到哪台都不可能"拉不到"。
+// main.py 的 REALITY_TARGET_GROUPS 是同一份数据，改一处必须同步另一处（verify 脚本会比对）。
+function renderRealityPresets() {
   const sel = $('#realityPreset');
-  try{
-    const d = await api('api/reality-targets');
-    const custom = sel.querySelector('option[value="custom"]');
-    (d.groups || []).forEach(g => {
-      const og = document.createElement('optgroup');
-      og.label = g.label;
-      (g.targets || []).forEach(t => {
-        const o = document.createElement('option');
-        o.value = t.host;
-        o.textContent = t.name + ' · ' + String(g.label).split(' · ')[0];
-        og.appendChild(o);
-      });
-      sel.insertBefore(og, custom);
+  if (!sel) return;
+  const custom = sel.querySelector('option[value="custom"]');
+  sel.querySelectorAll('optgroup').forEach(node => node.remove());
+  REALITY_TARGET_GROUPS.forEach(g => {
+    const og = document.createElement('optgroup');
+    og.label = g.label;
+    (g.targets || []).forEach(t => {
+      const o = document.createElement('option');
+      o.value = t.host;
+      o.textContent = t.name + ' · ' + String(g.label).split(' · ')[0];
+      og.appendChild(o);
     });
-    const first = sel.querySelector('optgroup option');
-    if (first) sel.value = first.value;
-  }catch(e){ /* 读不到列表时保留自定义输入，不阻断建节点 */ }
+    sel.insertBefore(og, custom);
+  });
+  const first = sel.querySelector('optgroup option');
+  if (first) sel.value = first.value;
   updateRealityPreset();
+}
+
+function loadRealityTargets() {
+  renderRealityPresets();
 }
 
 function updateRealityPreset() {

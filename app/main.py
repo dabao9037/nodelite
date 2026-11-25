@@ -1661,28 +1661,62 @@ def meta(_=Depends(require_admin)):
     return {"version": app_version()}
 
 
-REALITY_TARGETS_BUNDLED = Path(os.environ.get(
-    "REALITY_TARGETS_BUNDLED", str(NODELITE_HOME / "config" / "reality-targets.json")))
+REALITY_TARGET_GROUPS = [
+    {
+        "label": "美国 · 开源软件基础设施",
+        "targets": [
+            {"name": "Debian", "host": "www.debian.org"},
+            {"name": "PostgreSQL", "host": "www.postgresql.org"},
+        ],
+    },
+    {
+        "label": "英国 · 科研设施 / 高校",
+        "targets": [
+            {"name": "SKAO", "host": "www.skao.int"},
+            {"name": "Imperial College London", "host": "www.imperial.ac.uk"},
+        ],
+    },
+    {
+        "label": "日本 · 二次元 / 游戏媒体",
+        "targets": [
+            {"name": "4Gamer", "host": "www.4gamer.net"},
+            {"name": "Famitsu", "host": "www.famitsu.com"},
+        ],
+    },
+    {
+        "label": "东南亚 · 科研机构 / 旅游资讯",
+        "targets": [
+            {"name": "A*STAR", "host": "www.a-star.edu.sg"},
+            {"name": "Visit Singapore", "host": "www.visitsingapore.com"},
+        ],
+    },
+    {
+        "label": "欧洲 · 科研 / 游戏平台",
+        "targets": [
+            {"name": "Fraunhofer", "host": "www.fraunhofer.de"},
+            {"name": "GOG", "host": "www.gog.com"},
+        ],
+    },
+    {
+        "label": "香港 · 科创园区 / 公共服务",
+        "targets": [
+            {"name": "HKSTP", "host": "www.hkstp.org"},
+            {"name": "Hong Kong Observatory", "host": "www.hko.gov.hk"},
+        ],
+    },
+    {
+        "label": "迪拜 · 旅游资讯 / 政务服务",
+        "targets": [
+            {"name": "Visit Dubai", "host": "www.visitdubai.com"},
+            {"name": "Dubai Municipality", "host": "www.dm.gov.ae"},
+        ],
+    },
+]
 
 
 def reality_target_groups():
-    """Bundled Reality disguise targets (single source of truth for the UI)."""
-    try:
-        doc = json.loads(REALITY_TARGETS_BUNDLED.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    groups = []
-    for group in doc.get("groups") or []:
-        label = str(group.get("label") or "").strip()
-        targets = []
-        for target in group.get("targets") or []:
-            name = str(target.get("name") or "").strip()
-            host = str(target.get("host") or "").strip()
-            if label and name and host:
-                targets.append({"name": name, "host": host})
-        if targets:
-            groups.append({"label": label, "targets": targets})
-    return groups
+    """Reality 伪装目标：内嵌常量，不依赖任何文件或网络。"""
+    return [{"label": g["label"], "targets": [dict(t) for t in g["targets"]]} for g in REALITY_TARGET_GROUPS]
 
 
 @app.get("/api/reality-targets")

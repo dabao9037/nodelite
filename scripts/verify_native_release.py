@@ -19,20 +19,25 @@ groups = targets_document["groups"]
 assert len(groups) == 7
 expected = {target["host"] for group in groups for target in group["targets"]}
 assert len(expected) == 14
-# 下拉改成运行时从 /api/reality-targets 拉了，页面里不再写死域名。
-for group in groups:
-    for target in group["targets"]:
-        host = target["host"]
-        assert f'<option value="{host}"' not in page, host
-assert '<select id="realityPreset">' in page
-assert 'loadRealityTargets' in script
-assert "api('api/reality-targets')" in script or 'api("api/reality-targets")' in script
-for marker in ('@app.get("/api/reality-targets")', "def reality_target_groups()",
-               'NODELITE_HOME / "config" / "reality-targets.json"'):
-    assert marker in backend, marker
-# 安装器必须把 config/ 里的静态文件装进去（nodelite.env 例外），否则列表是空的。
-assert "nodelite.env) continue ;;" in installer
-assert 'cp -a -- "$static_file" "$INSTALL_DIR/config/"' in installer
+# 列表内嵌在 app.js 和 main.py 里，不读文件、不调接口；两边必须一致。
+assert "REALITY_TARGETS_BUNDLED" not in backend
+assert "REALITY_TARGET_GROUPS" in backend
+assert "REALITY_TARGET_GROUPS" in script
+assert "renderRealityPresets" in script
+assert 'api(/api/reality-targets)' not in script
+assert "@app.get(\"/api/reality-targets\")" in backend
+
+
+def hosts_in(text):
+    found = set(re.findall(r'host[":\s=]+"?(www\.[a-z0-9.\-]+)"?', text))
+    return found
+
+
+expected_hosts = {t["host"] for g in groups for t in g["targets"]}
+assert hosts_in(backend) == expected_hosts, hosts_in(backend) ^ expected_hosts
+assert hosts_in(script) == expected_hosts, hosts_in(script) ^ expected_hosts
+assert backend.count('"label": "') == len(groups)
+assert script.count('label: "') == len(groups)
 
 methods = [
     "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",

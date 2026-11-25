@@ -939,6 +939,20 @@ install_release_code() {
     rm -rf -- "$INSTALL_DIR/$name"
     cp -a -- "$item" "$INSTALL_DIR/"
   done
+  # config/ 整目录跳过是为了保住 nodelite.env（运行时状态，重装不能覆盖）。
+  # 但发行包里的静态数据必须落地：reality-targets.json 不装进去，
+  # 面板 /api/reality-targets 就会读到空列表，新建节点时只剩「自定义域名」。
+  local static_file
+  if [[ -d "$release_dir/config" ]]; then
+    mkdir -p "$INSTALL_DIR/config"
+    for static_file in "$release_dir"/config/*; do
+      [[ -f "$static_file" ]] || continue
+      case "${static_file##*/}" in
+        nodelite.env) continue ;;
+      esac
+      cp -a -- "$static_file" "$INSTALL_DIR/config/"
+    done
+  fi
 }
 
 stop_legacy_docker() {
